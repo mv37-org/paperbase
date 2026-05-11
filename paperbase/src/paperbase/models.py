@@ -150,13 +150,34 @@ class TrendingPaperDetailResponse(BaseModel):
     arxiv_id: str
     title: str
     authors: str
+    abstract: str = ""
+    tldr: str = ""
     published: str
+    updated: str = ""
     primary_category: str
     categories: str
+    doi: str | None = None
+    comment: str | None = None
+    journal_ref: str | None = None
     summary_short: str
     html_url: str
     pdf_url: str
     image_url: str | None = None
+    citation_count: int = 0
+    influential_citation_count: int = 0
+    semantic_scholar_id: str | None = None
+    code_url: str | None = None
+    code_url_source: str | None = None
+    code_index_status: str = "none"
+    code_is_python: bool | None = None
+    code_python_reason: str | None = None
+    venue: str | None = None
+    venue_year: int | None = None
+    venue_source: str | None = None
+    top_author_s2_id: str | None = None
+    source_type: str | None = None
+    index_status: str = "indexed"
+    indexed_at: datetime | None = None
     upvote_count: int = 1
     viewer_has_upvoted: bool = False
     comments: list[PaperCommentResponse] = Field(default_factory=list)

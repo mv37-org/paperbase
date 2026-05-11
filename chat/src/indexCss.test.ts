@@ -36,6 +36,15 @@ describe("index.css", () => {
     const workspaceTrendingBlock = css.match(/\.workspace-page-trending\s*\{([^}]*)\}/)?.[1] ?? "";
     const cardBlock = css.match(/\.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
+    const detailHeroBlock = css.match(/\.trending-detail-hero\s*\{([^}]*)\}/)?.[1] ?? "";
+    const detailImageWrapBlock = css.match(/\.trending-detail-image-wrap\s*\{([^}]*)\}/)?.[1] ?? "";
+    const detailImageBlock = css.match(/\.trending-detail-image\s*\{([^}]*)\}/)?.[1] ?? "";
+    const detailCopyBlock = css.match(/\.trending-detail-copy\s*\{([^}]*)\}/)?.[1] ?? "";
+    const metadataGridBlock = css.match(/\.trending-metadata-grid\s*\{([^}]*)\}/)?.[1] ?? "";
+    const landingDetailTitleMatch = css.match(
+      /\.trending-page-landing\.detail-open \.workspace-page-header h2\s*\{([^}]*)\}/,
+    );
+    const landingDetailTitleBlock = landingDetailTitleMatch?.[1] ?? "";
     const activeVoteBlock = css.match(/\.trending-vote-button\.active\s*\{([^}]*)\}/)?.[1] ?? "";
 
     expect(workspaceTrendingBlock).toContain(
@@ -54,6 +63,16 @@ describe("index.css", () => {
     expect(cardBlock).toContain("border-radius: 4px;");
     expect(imageBlock).toContain("height: clamp(108px, 15vw, 132px);");
     expect(imageBlock).toContain("object-fit: contain;");
+    expect(detailHeroBlock).toContain("grid-template-columns: 1fr;");
+    expect(detailImageWrapBlock).toContain("place-items: center;");
+    expect(detailImageWrapBlock).toContain("width: min(100%, 1040px);");
+    expect(detailImageBlock).toContain("height: auto;");
+    expect(detailImageBlock).toContain("object-fit: contain;");
+    expect(detailImageBlock).not.toContain("max-height:");
+    expect(detailImageBlock).not.toContain("aspect-ratio:");
+    expect(detailCopyBlock).toContain("width: min(100%, 980px);");
+    expect(metadataGridBlock).toContain("display: grid;");
+    expect(landingDetailTitleBlock).toContain("font-size: clamp(22px, 3vw, 34px);");
     expect(activeVoteBlock).toContain("border-color: #99582a;");
     expect(activeVoteBlock).toContain("color: #99582a;");
     expect(css).toContain(".trending-card-title-button");

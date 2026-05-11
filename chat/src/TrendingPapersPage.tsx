@@ -42,6 +42,102 @@ function sortLabel(sort: TrendingSort) {
   return sort === "upvotes" ? "Hottest" : "Latest";
 }
 
+type TrendingMetadataRow = {
+  label: string;
+  value: string;
+  href?: string;
+};
+
+function cleanMetadataValue(value: string | number | boolean | null | undefined) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  return String(value).trim();
+}
+
+function formatMetadataCount(value: number | null | undefined) {
+  return typeof value === "number" ? new Intl.NumberFormat().format(value) : "";
+}
+
+function normalizeDetailText(value: string | null | undefined) {
+  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function doiUrl(doi: string) {
+  const trimmed = doi.trim();
+  return trimmed.startsWith("http://") || trimmed.startsWith("https://")
+    ? trimmed
+    : `https://doi.org/${trimmed}`;
+}
+
+function buildTrendingMetadataRows(
+  detail: TrendingPaperDetail,
+  showVotes: boolean,
+): TrendingMetadataRow[] {
+  const rows: TrendingMetadataRow[] = [];
+  const add = (
+    label: string,
+    value: string | number | boolean | null | undefined,
+    href?: string | null,
+  ) => {
+    const cleanValue = cleanMetadataValue(value);
+    if (!cleanValue) {
+      return;
+    }
+    rows.push({ label, value: cleanValue, href: href ?? undefined });
+  };
+  const venue = [detail.venue, detail.venue_year].filter(Boolean).join(" ");
+
+  add("Authors", detail.authors);
+  add("Paperbase ID", detail.paper_id);
+  add("arXiv ID", detail.arxiv_id, `https://arxiv.org/abs/${detail.arxiv_id}`);
+  add("HTML URL", detail.html_url, detail.html_url);
+  add("PDF URL", detail.pdf_url, detail.pdf_url);
+  add("Primary category", detail.primary_category);
+  if (detail.categories !== detail.primary_category) {
+    add("Categories", detail.categories);
+  }
+  add("Published", detail.published);
+  add("Updated", detail.updated);
+  add("Venue", venue);
+  add("Venue source", detail.venue_source);
+  add("Journal reference", detail.journal_ref);
+  add("DOI", detail.doi, detail.doi ? doiUrl(detail.doi) : null);
+  add("arXiv comment", detail.comment);
+  add("Citations", formatMetadataCount(detail.citation_count));
+  add("Influential citations", formatMetadataCount(detail.influential_citation_count));
+  if (showVotes) {
+    add("Paperbase upvotes", formatMetadataCount(detail.upvote_count));
+  }
+  add(
+    "Semantic Scholar",
+    detail.semantic_scholar_id,
+    detail.semantic_scholar_id
+      ? `https://www.semanticscholar.org/paper/${detail.semantic_scholar_id}`
+      : null,
+  );
+  add(
+    "Top author S2 ID",
+    detail.top_author_s2_id,
+    detail.top_author_s2_id
+      ? `https://www.semanticscholar.org/author/${detail.top_author_s2_id}`
+      : null,
+  );
+  add("Code URL", detail.code_url, detail.code_url);
+  add("Code URL source", detail.code_url_source);
+  add("Code index status", detail.code_index_status);
+  add("Python code", detail.code_is_python);
+  add("Code note", detail.code_python_reason);
+  add("Source type", detail.source_type);
+  add("Index status", detail.index_status);
+  add("Indexed at", detail.indexed_at);
+
+  return rows;
+}
+
 function TrendingVoteButton({
   upvoteCount,
   viewerHasUpvoted,
@@ -290,8 +386,17 @@ export function TrendingPapersPage({
     };
   }, [browseState.paperId]);
 
+  const detailDescription =
+    detail && browseState.paperId
+      ? [
+          detail.primary_category || detail.categories,
+          detail.published && `Published ${detail.published}`,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : `Published ${browseState.date}`;
   const pageDescription = browseState.paperId
-    ? `Published ${detail?.published ?? browseState.date}. Start with the summary, then open the paper or join the discussion when you are ready.`
+    ? detailDescription
     : (feedDescription ??
       "Explore research papers that are ready to read in Paperbase. Latest shows the newest papers across the library, while Hottest shows the most-upvoted papers overall.");
 
@@ -379,6 +484,15 @@ export function TrendingPapersPage({
   const showPager = showPagination && (hasPreviousPage || hasNextPage);
   const headingText = browseState.paperId ? (detail?.title ?? "Loading paper") : feedTitle;
   const showVotes = variant !== "landing";
+  const metadataRows = detail ? buildTrendingMetadataRows(detail, showVotes) : [];
+  const summaryText = detail?.summary_short?.trim() || "Summary is still being prepared.";
+  const showTldr =
+    Boolean(detail?.tldr?.trim()) &&
+    normalizeDetailText(detail?.tldr) !== normalizeDetailText(summaryText);
+  const showAbstract =
+    Boolean(detail?.abstract?.trim()) &&
+    normalizeDetailText(detail?.abstract) !== normalizeDetailText(summaryText) &&
+    normalizeDetailText(detail?.abstract) !== normalizeDetailText(detail?.tldr);
 
   return (
     <section
@@ -537,46 +651,77 @@ export function TrendingPapersPage({
                     </div>
                   )}
                 </div>
-                <div className="trending-detail-copy">
-                  <div className="trending-detail-meta">
-                    <span>{detail.authors}</span>
-                    <span>
-                      {detail.primary_category || detail.categories}
-                      {detail.published ? ` · ${detail.published}` : ""}
-                    </span>
-                  </div>
-                  <div className="trending-detail-actions">
-                    <a
-                      href={detail.html_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="trending-card-link"
-                    >
-                      Read paper
-                    </a>
-                    <a
-                      href={detail.pdf_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="trending-card-link"
-                    >
-                      PDF
-                    </a>
-                    {showVotes ? (
-                      <TrendingVoteButton
-                        upvoteCount={detail.upvote_count}
-                        viewerHasUpvoted={detail.viewer_has_upvoted}
-                        pending={votePendingPaperId === detail.paper_id}
-                        onClick={() => void handleVote(detail.paper_id, detail.viewer_has_upvoted)}
-                      />
-                    ) : null}
-                  </div>
-                  <section className="trending-summary-section">
-                    <h2>Summary</h2>
-                    <p>{detail.summary_short || "Summary is still being prepared."}</p>
-                  </section>
-                </div>
               </section>
+
+              <div className="trending-detail-copy">
+                <div className="trending-detail-actions">
+                  <a
+                    href={detail.html_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="trending-card-link"
+                  >
+                    Read paper
+                  </a>
+                  <a
+                    href={detail.pdf_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="trending-card-link"
+                  >
+                    PDF
+                  </a>
+                  {showVotes ? (
+                    <TrendingVoteButton
+                      upvoteCount={detail.upvote_count}
+                      viewerHasUpvoted={detail.viewer_has_upvoted}
+                      pending={votePendingPaperId === detail.paper_id}
+                      onClick={() => void handleVote(detail.paper_id, detail.viewer_has_upvoted)}
+                    />
+                  ) : null}
+                </div>
+
+                <section className="trending-summary-section">
+                  <h2>Summary</h2>
+                  <p>{summaryText}</p>
+                </section>
+
+                {showTldr ? (
+                  <section className="trending-summary-section">
+                    <h2>TL;DR</h2>
+                    <p>{detail.tldr}</p>
+                  </section>
+                ) : null}
+
+                {metadataRows.length ? (
+                  <section className="trending-metadata-section">
+                    <h2>Paper details</h2>
+                    <dl className="trending-metadata-grid">
+                      {metadataRows.map((row) => (
+                        <div key={row.label} className="trending-metadata-row">
+                          <dt>{row.label}</dt>
+                          <dd>
+                            {row.href ? (
+                              <a href={row.href} target="_blank" rel="noreferrer">
+                                {row.value}
+                              </a>
+                            ) : (
+                              row.value
+                            )}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </section>
+                ) : null}
+
+                {showAbstract ? (
+                  <section className="trending-summary-section">
+                    <h2>Abstract</h2>
+                    <p>{detail.abstract}</p>
+                  </section>
+                ) : null}
+              </div>
 
               <section className="trending-comments-section">
                 <div className="trending-section-heading">

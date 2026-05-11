@@ -2260,7 +2260,10 @@ def test_browser_trending_detail_is_public(api_client):
     response = client.get("/v1/browser/trending/papers/arxiv:2401.54321")
 
     assert response.status_code == 200
-    assert response.json()["paper_id"] == "arxiv:2401.54321"
+    payload = response.json()
+    assert payload["paper_id"] == "arxiv:2401.54321"
+    assert payload["citation_count"] == 0
+    assert payload["code_index_status"] == "none"
     assert ("get_browser_trending_paper", ("arxiv:2401.54321", None)) in service.calls
 
 

@@ -2576,17 +2576,10 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   align-self: stretch;
 }
 
-.trending-card-image,
-.trending-detail-image {
-  width: 100%;
-  display: block;
-  border-radius: var(--radius);
-  object-fit: cover;
-  background: linear-gradient(180deg, rgba(27, 22, 17, 0.03), rgba(27, 22, 17, 0.08));
-}
-
 .trending-card-image {
+  width: 100%;
   height: clamp(108px, 15vw, 132px);
+  display: block;
   border: 1px solid rgba(27, 22, 17, 0.1);
   border-radius: 3px 3px 0 0;
   object-fit: contain;
@@ -2774,38 +2767,89 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 }
 
 .trending-detail {
-  gap: 28px;
+  gap: 30px;
+}
+
+.trending-page.detail-open .trending-page-header {
+  align-items: flex-start;
+  padding-bottom: 2px;
+}
+
+.trending-page.detail-open .trending-page-header-copy {
+  max-width: 880px;
+}
+
+.trending-page-landing.detail-open .workspace-page-header h2 {
+  font-size: clamp(22px, 3vw, 34px);
+  line-height: 1.1;
 }
 
 .trending-detail-hero {
   display: grid;
-  grid-template-columns: minmax(280px, 460px) minmax(0, 1fr);
-  gap: 24px;
-  align-items: start;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  align-items: center;
+}
+
+.trending-detail-image-wrap {
+  display: grid;
+  place-items: center;
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  padding: clamp(10px, 2vw, 18px);
+  border: 1px solid rgba(27, 22, 17, 0.12);
+  border-radius: 8px;
+  background: #f3efe6;
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.08);
 }
 
 .trending-detail-image {
-  aspect-ratio: 4 / 5;
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid rgba(27, 22, 17, 0.1);
+  border-radius: 4px;
+  background: #ffffff;
+  object-fit: contain;
+  object-position: center;
+}
+
+.trending-detail-image.trending-card-image-fallback {
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  border: 0;
+  box-shadow: none;
 }
 
 .trending-detail-copy {
   display: grid;
-  gap: 18px;
+  align-content: start;
+  gap: 24px;
+  width: min(100%, 980px);
+  margin: 0 auto;
 }
 
-.trending-detail-meta {
-  display: grid;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 13px;
+.trending-detail-actions .trending-card-link {
+  border-color: rgba(27, 22, 17, 0.14);
+  background: #ffffff;
+  color: var(--text);
+  font-weight: 650;
+}
+
+.trending-detail-actions .trending-card-link:hover,
+.trending-detail-actions .trending-card-link:focus-visible {
+  border-color: rgba(27, 22, 17, 0.28);
+  background: #f8f5ee;
 }
 
 .trending-summary-section {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .trending-summary-section h2,
+.trending-metadata-section h2,
 .trending-section-heading h2 {
   margin: 0;
   font-size: 18px;
@@ -2818,6 +2862,46 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   margin: 0;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.trending-metadata-section {
+  display: grid;
+  gap: 12px;
+}
+
+.trending-metadata-grid {
+  display: grid;
+  margin: 0;
+  border-top: 1px solid rgba(27, 22, 17, 0.1);
+}
+
+.trending-metadata-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(27, 22, 17, 0.1);
+}
+
+.trending-metadata-row dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.trending-metadata-row dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.trending-metadata-row a {
+  color: inherit;
+  text-decoration-color: rgba(27, 22, 17, 0.28);
+  text-underline-offset: 3px;
 }
 
 .trending-section-heading {
@@ -2912,6 +2996,20 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 @media (max-width: 900px) {
   .trending-detail-hero {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .trending-page-landing.detail-open .workspace-page-header h2 {
+    font-size: 22px;
+  }
+
+  .trending-detail-image-wrap {
+    padding: 8px;
+  }
+
+  .trending-detail-image.trending-card-image-fallback {
+    min-height: 260px;
   }
 }
 

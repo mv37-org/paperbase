@@ -77,13 +77,34 @@ describe("TrendingPapersPage", () => {
       arxiv_id: "2401.12345",
       title: "Trending Paper",
       authors: "Ada Lovelace",
+      abstract: "Full abstract with the main result and evaluation setup.",
+      tldr: "Semantic Scholar TLDR",
       published: "2026-04-21",
+      updated: "2026-04-22",
       primary_category: "cs.AI",
-      categories: "cs.AI",
+      categories: "cs.AI cs.LG",
+      doi: "10.1234/trending",
+      comment: "Accepted at TestConf",
+      journal_ref: "Journal of Tests 1(2)",
       summary_short: "Technical summary",
       html_url: "https://example.test/2401.12345",
       pdf_url: "https://example.test/2401.12345.pdf",
       image_url: "https://example.test/preview.webp",
+      citation_count: 42,
+      influential_citation_count: 7,
+      semantic_scholar_id: "s2-paper-1",
+      code_url: "https://github.com/example/trending-paper",
+      code_url_source: "hf_papers",
+      code_index_status: "indexed",
+      code_is_python: true,
+      code_python_reason: "Python package detected",
+      venue: "International Conference on Test Learning",
+      venue_year: 2026,
+      venue_source: "s2_bulk",
+      top_author_s2_id: "author-1",
+      source_type: "html",
+      index_status: "indexed",
+      indexed_at: "2026-04-22T00:00:00Z",
       upvote_count: 12,
       viewer_has_upvoted: false,
       comments: [
@@ -166,6 +187,29 @@ describe("TrendingPapersPage", () => {
     expect(screen.getByText("Technical summary")).toBeTruthy();
     expect(screen.getByText("Root note")).toBeTruthy();
     expect(screen.getByText("Reply note")).toBeTruthy();
+    expect(document.querySelector(".trending-detail-hero")).toBeTruthy();
+    const detailImageWrap = document.querySelector(".trending-detail-image-wrap");
+    expect(detailImageWrap).toBeTruthy();
+    expect(detailImageWrap?.querySelector(".trending-detail-image")?.getAttribute("src")).toBe(
+      "https://example.test/preview.webp",
+    );
+    expect(document.querySelector(".trending-detail-hero .trending-detail-copy")).toBeNull();
+    expect(screen.getByText("TL;DR")).toBeTruthy();
+    expect(screen.getByText("Semantic Scholar TLDR")).toBeTruthy();
+    expect(screen.getByText("Paper details")).toBeTruthy();
+    expect(screen.getByText("Authors")).toBeTruthy();
+    expect(screen.getByText("Categories")).toBeTruthy();
+    expect(screen.getByText("cs.AI cs.LG")).toBeTruthy();
+    expect(screen.getByText("Citations")).toBeTruthy();
+    expect(screen.getByText("42")).toBeTruthy();
+    expect(screen.getByText("DOI").nextElementSibling?.textContent).toContain("10.1234/trending");
+    expect(screen.getByText("Code URL").nextElementSibling?.textContent).toContain(
+      "https://github.com/example/trending-paper",
+    );
+    expect(screen.getByText("Abstract")).toBeTruthy();
+    expect(
+      screen.getByText("Full abstract with the main result and evaluation setup."),
+    ).toBeTruthy();
     expect(screen.getByRole("link", { name: "Read paper" }).getAttribute("href")).toBe(
       "https://example.test/2401.12345",
     );

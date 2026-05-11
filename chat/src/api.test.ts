@@ -299,13 +299,34 @@ describe("chat api", () => {
           arxiv_id: "2401.12345",
           title: "Benchmark Paper",
           authors: "Ada Lovelace",
+          abstract: "Full benchmark abstract",
+          tldr: "Benchmark TLDR",
           published: "2026-04-21",
+          updated: "2026-04-22",
           primary_category: "cs.AI",
           categories: "cs.AI",
+          doi: "10.1234/benchmark",
+          comment: "Accepted",
+          journal_ref: "Benchmark Journal",
           summary_short: "Technical summary",
           html_url: "https://arxiv.org/abs/2401.12345",
           pdf_url: "https://arxiv.org/pdf/2401.12345.pdf",
           image_url: "/v1/browser/trending/papers/arxiv%3A2401.12345/preview/content",
+          citation_count: 99,
+          influential_citation_count: 11,
+          semantic_scholar_id: "s2-benchmark",
+          code_url: "https://github.com/example/benchmark",
+          code_url_source: "admin",
+          code_index_status: "indexed",
+          code_is_python: true,
+          code_python_reason: "Python files found",
+          venue: "ICLR",
+          venue_year: 2026,
+          venue_source: "s2_bulk",
+          top_author_s2_id: "author-benchmark",
+          source_type: "html",
+          index_status: "indexed",
+          indexed_at: "2026-04-22T00:00:00Z",
           upvote_count: 12,
           viewer_has_upvoted: false,
           comments: [],
@@ -329,6 +350,9 @@ describe("chat api", () => {
     expect(feed.papers[0]?.upvote_count).toBe(12);
     expect(feed.has_next).toBe(true);
     expect(detail.summary_short).toBe("Technical summary");
+    expect(detail.abstract).toBe("Full benchmark abstract");
+    expect(detail.citation_count).toBe(99);
+    expect(detail.code_url).toBe("https://github.com/example/benchmark");
   });
 
   it("loads generic paper discussion and attaches CSRF headers to paper write operations", async () => {
