@@ -6030,6 +6030,8 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert "First infer the key bullet points" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "exactly one direct research fact or conclusion" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "no wordplay, no clever titles" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "beginner-friendly technical language" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "define acronyms on first mention" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "Make the slides heavy with research conclusions" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "The title must itself be the fact or conclusion" in str(
         chat_model.create_calls[-1]["system_prompt"]
@@ -6042,6 +6044,10 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert "conclusion callout that points at the decisive evidence" in str(
         chat_model.create_calls[-1]["system_prompt"]
     )
+    assert "The left visual is not a title slide" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "do not repeat the slide title" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "no SVG/HTML text may exceed 22px" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "Avoid oversized typographic posters" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "paperbasePresentation.size()" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "project sidebar opens or closes" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "manually hard-coded node grids" in str(chat_model.create_calls[-1]["system_prompt"])
@@ -6469,7 +6475,8 @@ def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
     assert "The presentation workflow completed" not in completed.summary_markdown
     assert "| Paper explorations |" not in completed.summary_markdown
     assert "ReactDOM.createRoot" in completed.visual_code
-    assert "RESEARCH SLIDE" in completed.visual_code
+    assert "RESEARCH VISUAL" in completed.visual_code
+    assert "SIGNAL STRENGTH" in completed.visual_code
     assert completed.slides
     assert completed.slides[0].visual_type == "code"
     assert email_sender.presentation_emails == [

@@ -1952,8 +1952,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  background: transparent;
+  object-fit: contain;
+  background: #f7f2ea;
 }
 
 .project-presentation-fixed-header {
@@ -2040,8 +2040,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   scroll-snap-align: start;
   display: grid;
   align-content: center;
-  gap: 12px;
-  padding: clamp(18px, 3vw, 42px);
+  gap: 10px;
+  padding: clamp(18px, 2.7vw, 36px);
   color: var(--text);
 }
 
@@ -2054,22 +2054,22 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 }
 
 .project-presentation-slide-copy h1 {
-  max-width: 16ch;
+  max-width: 21ch;
   margin: 0;
   font-family: Georgia, "Iowan Old Style", serif;
-  font-size: clamp(22px, 2.4vw, 32px);
-  font-weight: 500;
-  line-height: 1.08;
+  font-size: clamp(18px, 1.85vw, 25px);
+  font-weight: 520;
+  line-height: 1.13;
   letter-spacing: 0;
 }
 
 .project-presentation-slide-copy p {
-  max-width: 58ch;
+  max-width: 54ch;
   margin: 0;
   color: color-mix(in srgb, var(--text) 82%, var(--muted));
   font-family: Georgia, "Iowan Old Style", serif;
-  font-size: clamp(14px, 1vw, 17px);
-  line-height: 1.5;
+  font-size: clamp(13px, 0.9vw, 15px);
+  line-height: 1.55;
 }
 
 .project-presentation-slide-dots {
@@ -2146,7 +2146,7 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
   height: 100%;
   min-height: 0;
   border: 0;
-  background: #ffffff;
+  background: #f7f2ea;
 }
 
 .project-presentation-share-modal {

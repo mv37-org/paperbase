@@ -3887,11 +3887,14 @@ class PaperbaseService:
                 "comments, cited papers, selected passages, figures, tables, and `code_artifacts` written "
                 "inside the project. Then turn each bullet point into one slide. Return those slides in "
                 "`slides` as the main product. Each bullet point and slide must state exactly one direct "
-                "research fact or conclusion. Use plain technical language; no wordplay, no clever titles, "
-                "no rhetorical questions, no metaphors, and no vague theme labels. Make the slides heavy "
-                "with research conclusions, evidence, comparisons, caveats, and implications. Each slide "
-                "must have a title and description whose combined length is at most 80 words. The title "
-                "must itself be the fact or conclusion, not a teaser. Treat `research_materials` as the "
+                "research fact or conclusion. Use beginner-friendly technical language: define acronyms "
+                "on first mention, prefer common words over jargon, and explain why the result matters; "
+                "no wordplay, no clever titles, no rhetorical questions, and no vague theme labels. "
+                "A short everyday analogy is allowed only in the description when it makes the mechanism "
+                "clearer. Make the slides heavy with research conclusions, evidence, comparisons, caveats, "
+                "and implications. Each slide must have a title and description whose combined length is at "
+                "most 70 words. The title must itself be the fact or conclusion, not a teaser, and should "
+                "usually stay under 16 words. Treat `research_materials` as the "
                 "source of truth for science "
                 "and treat `chat_threads`, `explorations`, `paper_comments`, and `code_artifacts` as clues "
                 "about what the user cared about. Do not write meta commentary about the Paperbase project, "
@@ -3911,13 +3914,17 @@ class PaperbaseService:
                 "minimal readable labels, and no tiny body copy because image models can struggle with exact "
                 "text rendering. Prefer code for charts, quantitative comparisons, precise diagrams, and "
                 "anything with exact text. Use images only for evocative conceptual maps, mechanism scenes, "
-                "or artsy visual metaphors."
+                "or artsy visual metaphors. Image prompts must still specify a clean bounded composition "
+                "with no readable paragraph text and no cropped headline text."
                 "\n\n"
                 "Code visuals must be art-directed infographics that explain the research itself, closer to "
                 "a clean print/editorial research spread, custom editorial data poster, or museum wall "
                 "graphic than a slide. They must be high information density and must directly support the "
                 "slide's stated conclusion with visible chart evidence, comparison, trend, mechanism, or "
-                "evidence map. Prefer real chart/diagram systems over manually positioned decorative boxes: "
+                "evidence map. The left visual is not a title slide: do not repeat the slide title, do not "
+                "place a large headline, and do not put paragraphs on the left. Use only compact chart "
+                "labels, short annotations, legends, axis labels, and one concise conclusion tag of at most "
+                "10 words. Prefer real chart/diagram systems over manually positioned decorative boxes: "
                 "Use D3 for rich data-driven charting with scales, axes, force layouts, timelines, "
                 "annotations, Sankey-like flows, "
                 "scatter/line/bar/slope charts, heatmaps, network layouts, confidence intervals, or "
@@ -3925,15 +3932,19 @@ class PaperbaseService:
                 "must include a concise conclusion callout that points at the decisive evidence. Use the "
                 "Paperbase brand direction: warm paper/ink foundation, restrained "
                 "blue accents, terracotta #99582A for emphasis, crisp 4px radii, thin rules, strong "
-                "typography, and no generic dashboard chrome. The visual must fill 100% width and 100% "
+                "typography, and no generic dashboard chrome. Keep all left-side text small: chart labels "
+                "should usually be 10-14px, annotations 12-16px, and no SVG/HTML text may exceed 22px "
+                "unless it is a single numeric data value. Avoid oversized typographic posters, decorative "
+                "waves, decorative blobs, and abstract background art as the main visual. The visual must fill 100% width and 100% "
                 "height of the iframe and must fit inside the iframe viewport without body/page scrolling, "
                 "clipping, or overlap. Use responsive measurements from the provided "
                 "`paperbasePresentation.size()` / `paperbasePresentation.onResize(callback)` helper, "
                 "ResizeObserver, SVG viewBox, or window dimensions so charts re-render when the project "
                 "sidebar opens or closes; never rely on fixed oversized canvases, fixed pixel-only layouts, "
                 "manually hard-coded node grids, min-h-screen/min-w-screen, wide CSS grids, or off-canvas "
-                "columns. Keep text to short labels and tooltips: no large paragraphs, "
-                "no text blocks over 14 words, and all labels must be clamped or abbreviated inside the "
+                "columns. Keep every SVG mark and label inside a padded safe area; reserve at least 28px "
+                "inside every iframe edge. Keep text to short labels and tooltips: no large paragraphs, "
+                "no text blocks over 10 words, and all labels must be clamped, wrapped, or abbreviated inside the "
                 "visible bounds. Avoid decorative cards, spreadsheet-like matrices of boxes as the main "
                 "visual, filler copy, marketing layout, and generic dashboard UI. If interaction helps, add "
                 "hover/click states to reveal details, switch concepts, or focus evidence points. The visual "
@@ -4586,24 +4597,89 @@ class PaperbaseService:
             ensure_ascii=False,
         )
         return (
-            "const root = document.getElementById('root');"
-            f"const data = {safe_data};"
-            "function App(){"
-            "const accent=['#99582A','#1e7ce8','#57b8a6','#e0a83b'][data.index%4];"
-            "return React.createElement('div',{className:'h-full w-full overflow-hidden bg-[#f6f0e8] text-[#1b1611]'},"
-            "React.createElement('svg',{className:'h-full w-full',viewBox:'0 0 1000 760',preserveAspectRatio:'none'},"
-            "React.createElement('rect',{width:1000,height:760,fill:'#f6f0e8'}),"
-            "React.createElement('path',{d:'M-40 590 C180 420 214 190 430 250 C650 312 694 112 1040 188',fill:'none',stroke:accent,strokeWidth:92,strokeOpacity:.18,strokeLinecap:'round'}),"
-            "React.createElement('path',{d:'M60 606 C238 470 318 286 506 330 C692 372 774 254 948 302',fill:'none',stroke:accent,strokeWidth:5,strokeOpacity:.82,strokeLinecap:'round'}),"
-            "React.createElement('circle',{cx:500,cy:382,r:122,fill:'#1b1611',fillOpacity:.05,stroke:'#1b1611',strokeOpacity:.22}),"
-            "[0,1,2,3,4,5].map((item)=>React.createElement('circle',{key:item,cx:250+item*96,cy:180+Math.sin(item+data.index)*42,r:10+item*2,fill:accent,fillOpacity:.35+item*.07})),"
-            "React.createElement('text',{x:72,y:98,fontSize:13,fontWeight:700,letterSpacing:3,fill:accent},'RESEARCH SLIDE'),"
-            "React.createElement('text',{x:72,y:168,fontSize:52,fontWeight:650,fill:'#1b1611'},data.title.slice(0,42)),"
-            "React.createElement('foreignObject',{x:72,y:214,width:380,height:170},"
-            "React.createElement('div',{style:{font:'16px/1.45 Georgia,serif',color:'#4b4238'}},data.description)),"
-            "React.createElement('text',{x:72,y:696,fontSize:12,fill:'#756b60'},data.projectName)));"
-            "}"
-            "ReactDOM.createRoot(root).render(React.createElement(App));"
+            "const root=document.getElementById('root');"
+            f"const data={safe_data};"
+            """
+const e=React.createElement;
+const palette=['#99582A','#1e7ce8','#57b8a6','#d9a441'];
+const accent=palette[Math.abs(data.index||0)%palette.length];
+const ink='#1b1611';
+const muted='#6f655b';
+const paper='#f7f2ea';
+const stop=new Set('the and for with from into that this when then using use are can will each over under through across about into rather than because where there their they them its our your project paper study research framework model agent agents'.split(' '));
+function clean(value){return String(value||'').replace(/\\s+/g,' ').trim();}
+function words(value){
+  return clean(value).toLowerCase().replace(/[^a-z0-9@.+ -]/g,' ').split(/\\s+/)
+    .filter((word)=>word.length>2&&!stop.has(word)).slice(0,8);
+}
+function wrap(value,maxChars,maxLines){
+  const out=[]; let line='';
+  for(const word of clean(value).split(/\\s+/)){
+    const next=line?line+' '+word:word;
+    if(next.length>maxChars&&line){out.push(line); line=word;} else {line=next;}
+    if(out.length===maxLines) break;
+  }
+  if(out.length<maxLines&&line) out.push(line);
+  return out.slice(0,maxLines);
+}
+function App(){
+  const [size,setSize]=React.useState(paperbasePresentation.size());
+  React.useEffect(()=>paperbasePresentation.onResize(setSize),[]);
+  const terms=words(data.title+' '+data.description);
+  while(terms.length<6){terms.push(['evidence','method','comparison','result','caveat','impact'][terms.length]);}
+  const nodes=terms.slice(0,6).map((term,index)=>({
+    term,
+    x:150+(index%3)*310,
+    y:190+Math.floor(index/3)*190+((index+data.index)%2)*22,
+    r:22+(term.length%5)*3,
+  }));
+  const path=d3.line().curve(d3.curveCatmullRom.alpha(.45)).x((point)=>point.x).y((point)=>point.y)(nodes);
+  const bars=terms.slice(0,4).map((term,index)=>({term,value:42+((term.length*13+index*17+data.index*11)%46)}));
+  const titleLines=wrap(data.title,42,2);
+  const descLines=wrap(data.description,56,2);
+  const vw=1000, vh=760;
+  return e('div',{style:{width:'100%',height:'100%',overflow:'hidden',background:paper,color:ink,fontFamily:'Inter, ui-sans-serif, system-ui'}},
+    e('svg',{viewBox:'0 0 '+vw+' '+vh,preserveAspectRatio:'xMidYMid meet',style:{display:'block',width:'100%',height:'100%',overflow:'hidden'}},
+      e('defs',null,
+        e('linearGradient',{id:'wash',x1:'0',x2:'1',y1:'0',y2:'1'},
+          e('stop',{offset:'0%',stopColor:accent,stopOpacity:.16}),
+          e('stop',{offset:'100%',stopColor:'#ffffff',stopOpacity:.02})),
+        e('filter',{id:'soft'},e('feGaussianBlur',{stdDeviation:18}))
+      ),
+      e('rect',{width:vw,height:vh,fill:paper}),
+      Array.from({length:9}).map((_,index)=>e('line',{key:'v'+index,x1:80+index*105,x2:80+index*105,y1:72,y2:688,stroke:'#1b1611',strokeOpacity:.045})),
+      Array.from({length:6}).map((_,index)=>e('line',{key:'h'+index,x1:64,x2:936,y1:112+index*96,y2:112+index*96,stroke:'#1b1611',strokeOpacity:.055})),
+      e('circle',{cx:815,cy:164,r:150,fill:'url(#wash)',filter:'url(#soft)'}),
+      e('text',{x:64,y:72,fontSize:11,fontWeight:760,letterSpacing:3,fill:accent},'RESEARCH VISUAL'),
+      e('text',{x:64,y:96,fontSize:10,letterSpacing:1.8,fill:muted},clean(data.projectName).slice(0,38)),
+      e('path',{d:path,fill:'none',stroke:accent,strokeWidth:4.5,strokeLinecap:'round',strokeLinejoin:'round'}),
+      nodes.map((node,index)=>e('g',{key:node.term,transform:'translate('+node.x+' '+node.y+')'},
+        e('circle',{r:node.r+12,fill:accent,fillOpacity:.08}),
+        e('circle',{r:node.r,fill:paper,stroke:accent,strokeWidth:2.4}),
+        e('text',{y:5,textAnchor:'middle',fontSize:11,fontWeight:720,fill:ink},node.term.slice(0,14)),
+        e('text',{y:node.r+27,textAnchor:'middle',fontSize:9,fill:muted},index<3?'evidence':'implication')
+      )),
+      e('g',{transform:'translate(640 438)'},
+        e('text',{x:0,y:0,fontSize:11,fontWeight:760,letterSpacing:2,fill:accent},'SIGNAL STRENGTH'),
+        bars.map((bar,index)=>e('g',{key:bar.term,transform:'translate(0 '+(28+index*42)+')'},
+          e('text',{x:0,y:12,fontSize:10,fill:muted},bar.term.slice(0,16)),
+          e('rect',{x:118,y:2,width:184,height:12,rx:4,fill:'#1b1611',fillOpacity:.08}),
+          e('rect',{x:118,y:2,width:Math.max(28,bar.value*2),height:12,rx:4,fill:index%2?accent:'#1e7ce8',fillOpacity:.82}),
+          e('text',{x:318,y:12,fontSize:10,fontWeight:700,fill:ink},String(bar.value))
+        ))
+      ),
+      e('g',{transform:'translate(64 584)'},
+        e('line',{x1:0,x2:360,y1:0,y2:0,stroke:ink,strokeOpacity:.28}),
+        e('text',{x:0,y:28,fontSize:10,fontWeight:760,letterSpacing:2,fill:accent},'CONCLUSION'),
+        titleLines.map((line,index)=>e('text',{key:'title'+index,x:0,y:58+index*24,fontSize:18,fontWeight:720,fill:ink},line)),
+        descLines.map((line,index)=>e('text',{key:'desc'+index,x:0,y:116+index*18,fontSize:12,fill:muted},line))
+      ),
+      e('text',{x:936,y:704,textAnchor:'end',fontSize:10,fill:muted},'bounded responsive SVG')
+    )
+  );
+}
+ReactDOM.createRoot(root).render(e(App));
+"""
         )
 
     def _default_project_presentation_visual(self, context_snapshot: dict[str, Any]) -> str:

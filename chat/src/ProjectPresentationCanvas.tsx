@@ -20,10 +20,10 @@ function projectPresentationSrcDoc(visualCode: string) {
     <style>
       *, *::before, *::after { box-sizing: border-box; }
       html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-      body { background: #ffffff; color: #1b1611; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { background: #f7f2ea; color: #1b1611; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       #root { container-type: size; position: relative; }
       #root > * { max-width: 100%; max-height: 100%; }
-      svg, canvas { display: block; max-width: 100%; max-height: 100%; }
+      svg, canvas { display: block; max-width: 100%; max-height: 100%; overflow: hidden; }
       .presentation-error { padding: 24px; color: #9b3939; font: 14px/1.5 ui-sans-serif, system-ui; }
     </style>
   </head>
@@ -61,7 +61,10 @@ function projectPresentationSrcDoc(visualCode: string) {
             }
           }
           window.dispatchEvent(new CustomEvent("paperbase:presentation-resize", { detail: size }));
-          requestAnimationFrame(fitGeneratedVisual);
+          requestAnimationFrame(() => {
+            tightenGeneratedVisual();
+            fitGeneratedVisual();
+          });
         });
       }
       window.paperbasePresentation = {
@@ -73,6 +76,41 @@ function projectPresentationSrcDoc(visualCode: string) {
           return () => presentationResizeListeners.delete(listener);
         },
       };
+      function svgCoordinateWidth(svg) {
+        if (svg && svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) {
+          return svg.viewBox.baseVal.width;
+        }
+        const width = Number(svg && (svg.getAttribute("width") || svg.clientWidth));
+        return Number.isFinite(width) && width > 0 ? width : 1000;
+      }
+      function tightenGeneratedVisual() {
+        const root = document.getElementById("root");
+        if (!root) return;
+        for (const svg of root.querySelectorAll("svg")) {
+          svg.style.overflow = "hidden";
+          const svgWidth = svgCoordinateWidth(svg);
+          for (const text of svg.querySelectorAll("text")) {
+            const content = (text.textContent || "").trim();
+            const x = Number(text.getAttribute("x") || "0");
+            const safeX = Number.isFinite(x) ? Math.max(0, x) : 0;
+            const available = Math.max(80, svgWidth - safeX - 28);
+            const computed = window.getComputedStyle(text);
+            const rawSize = Number(text.getAttribute("font-size") || computed.fontSize.replace("px", ""));
+            const maxSize = content.length > 32 ? 22 : content.length > 18 ? 28 : 36;
+            if (Number.isFinite(rawSize) && rawSize > maxSize) {
+              text.setAttribute("font-size", String(maxSize));
+            }
+            if (content.length > 28 && typeof text.getComputedTextLength === "function") {
+              try {
+                if (text.getComputedTextLength() > available) {
+                  text.setAttribute("textLength", String(available));
+                  text.setAttribute("lengthAdjust", "spacingAndGlyphs");
+                }
+              } catch {}
+            }
+          }
+        }
+      }
       function fitGeneratedVisual() {
         const root = document.getElementById("root");
         const child = root && root.firstElementChild;
@@ -96,8 +134,14 @@ function projectPresentationSrcDoc(visualCode: string) {
       try {
         const run = new Function("React", "ReactDOM", "d3", "paperbasePresentation", generatedCode);
         run(window.React, window.ReactDOM, window.d3, window.paperbasePresentation);
-        requestAnimationFrame(fitGeneratedVisual);
-        window.addEventListener("resize", fitGeneratedVisual);
+        requestAnimationFrame(() => {
+          tightenGeneratedVisual();
+          fitGeneratedVisual();
+        });
+        window.addEventListener("resize", () => {
+          tightenGeneratedVisual();
+          fitGeneratedVisual();
+        });
         if (typeof ResizeObserver !== "undefined") {
           new ResizeObserver(notifyPresentationResize).observe(document.getElementById("root"));
         }

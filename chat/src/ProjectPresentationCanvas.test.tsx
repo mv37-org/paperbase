@@ -15,6 +15,8 @@ describe("ProjectPresentationCanvas", () => {
     expect(srcDoc).toContain("paperbasePresentation");
     expect(srcDoc).toContain("onResize(listener)");
     expect(srcDoc).toContain("presentationSize()");
+    expect(srcDoc).toContain("tightenGeneratedVisual()");
+    expect(srcDoc).toContain("textLength");
     expect(srcDoc).toContain("new ResizeObserver(notifyPresentationResize)");
     expect(srcDoc).toContain("paperbase:presentation-resize");
     expect(srcDoc).toContain('new Function("React", "ReactDOM", "d3", "paperbasePresentation"');
