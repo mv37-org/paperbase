@@ -95,33 +95,36 @@ export function ProjectPresentationDeck({
 
       <section className="project-presentation-summary project-presentation-slide-summary">
         <div className="project-presentation-fixed-header">
-          <ProjectPresentationAudioPlayer presentation={presentation} />
-          {!publicMode ? (
-            <div className="project-presentation-header-actions">
-              <button
-                type="button"
-                className="project-presentation-share-button"
-                onClick={() => setShareModalOpen(true)}
-              >
-                Share this presentation
-              </button>
-              {onRegenerate ? (
+          <div className="project-presentation-header-spacer" aria-hidden="true" />
+          <div className="project-presentation-header-actions">
+            <ProjectPresentationAudioPlayer presentation={presentation} />
+            {!publicMode ? (
+              <>
                 <button
                   type="button"
-                  className="project-presentation-inline-regenerate-button"
-                  disabled={regenerating}
-                  onClick={onRegenerate}
-                  aria-label="Regenerate presentation"
-                  title="Regenerate presentation"
+                  className="project-presentation-share-button"
+                  onClick={() => setShareModalOpen(true)}
                 >
-                  <AppIcon
-                    src={staticAssetPath("icons8-restart-50.svg")}
-                    className="project-presentation-regenerate-icon"
-                  />
+                  Share
                 </button>
-              ) : null}
-            </div>
-          ) : null}
+                {onRegenerate ? (
+                  <button
+                    type="button"
+                    className="project-presentation-inline-regenerate-button"
+                    disabled={regenerating}
+                    onClick={onRegenerate}
+                    aria-label="Regenerate presentation"
+                    title="Regenerate presentation"
+                  >
+                    <AppIcon
+                      src={staticAssetPath("icons8-restart-50.svg")}
+                      className="project-presentation-regenerate-icon"
+                    />
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+          </div>
         </div>
 
         <div ref={trackRef} className="project-presentation-slide-track" onScroll={handleScroll}>
@@ -211,21 +214,10 @@ function ProjectPresentationAudioPlayer({
   presentation: ProjectPresentationResponse;
 }) {
   if (!presentation.audio_url) {
-    return (
-      <div className="project-presentation-audio-player empty">
-        <div className="project-presentation-audio-copy">
-          <span>Audio walkthrough</span>
-          <small>Audio is not available for this presentation.</small>
-        </div>
-      </div>
-    );
+    return null;
   }
   return (
     <div className="project-presentation-audio-player">
-      <div className="project-presentation-audio-copy">
-        <span>Audio walkthrough</span>
-        <small>Two-person explainer</small>
-      </div>
       <audio
         controls
         preload="metadata"

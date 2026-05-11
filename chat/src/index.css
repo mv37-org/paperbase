@@ -1817,12 +1817,17 @@ body:has(.app-shell) #root {
   z-index: 2;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--paper) 96%, transparent);
   backdrop-filter: blur(10px);
+}
+
+.project-presentation-header-spacer {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .project-presentation-header-actions {
@@ -1974,41 +1979,19 @@ body:has(.app-shell) #root {
 }
 
 .project-presentation-audio-player {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
+  justify-content: flex-end;
+  flex: 0 0 auto;
   margin-bottom: 0;
   padding-bottom: 0;
   border-bottom: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.project-presentation-audio-player.empty {
-  min-height: 32px;
-}
-
-.project-presentation-audio-copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.project-presentation-audio-copy span {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.project-presentation-audio-copy small {
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.3;
-}
-
 .project-presentation-audio-player audio {
-  width: min(220px, 42%);
+  width: clamp(190px, 19vw, 290px);
+  min-width: 190px;
   height: 28px;
 }
 
@@ -2175,13 +2158,13 @@ body:has(.app-shell) #root {
     margin-right: 34px;
   }
 
-  .project-presentation-audio-player {
-    align-items: stretch;
-    flex-direction: column;
+  .project-presentation-header-actions {
+    flex-wrap: wrap;
   }
 
   .project-presentation-audio-player audio {
-    width: 100%;
+    width: min(210px, calc(100vw - 170px));
+    min-width: 150px;
   }
 }
 

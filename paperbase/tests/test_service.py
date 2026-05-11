@@ -6530,6 +6530,11 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
     assert completed.status == "completed"
     assert completed.audio_url.endswith(f"/v1/browser/projects/{project.project_id}/presentation/audio")
     assert "research substance and visual story" in chat_model.audio_system_prompt
+    assert "Make it ELI5" in chat_model.audio_system_prompt
+    assert "explain from first principles" in chat_model.audio_system_prompt
+    assert "vivid analogies" in chat_model.audio_system_prompt
+    assert "specific authors and paper titles" in chat_model.audio_system_prompt
+    assert "In the paper titled Y" in chat_model.audio_system_prompt
     assert "Do not make the app workflow" in chat_model.audio_system_prompt
     assert len(generated_segments) == 2
     assert generated_segments[0][0] != generated_segments[1][0]

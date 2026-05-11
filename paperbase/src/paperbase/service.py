@@ -4282,13 +4282,19 @@ class PaperbaseService:
                 "Project presentation audio script writer. Write a `turns` array. Each turn must "
                 "have `speaker` equal to `noob` or `expert`, and `text` as natural spoken dialogue. "
                 "Write a 5 to 10 minute two-person explainer about the research substance and visual "
-                "story in the presentation. The noob knows nothing and asks simple questions. The "
-                "industry expert explains the actual concepts, evidence, comparisons, caveats, and "
-                "implications to a total beginner. Do not make the app workflow, chat history, number "
-                "of papers, comments, notes, or explorations the topic. Mention user interactions only "
-                "when they point to a substantive research question. Do not include stage directions, "
-                "markdown, or speaker labels inside `text`. Keep each turn concise enough for "
-                "text-to-speech."
+                "story in the presentation. Make it ELI5: start with a warm intro that assumes the "
+                "listener knows nothing, explain from first principles before the main topics, then "
+                "build toward the specific research conclusions. Add excitement, vivid analogies, "
+                "concrete everyday examples, and clear transitions so it feels like a real podcast. "
+                "The noob should ask naive questions without pretending to understand. The industry "
+                "expert should answer simply first, then add the research nuance, evidence, "
+                "comparisons, caveats, and implications. End with a short podcast-style reference "
+                "segment that names specific authors and paper titles when available, using lines like "
+                "`In another paper by X, they argue...` or `In the paper titled Y, the authors show...`. "
+                "Do not make the app workflow, chat history, number of papers, comments, notes, or "
+                "explorations the topic. Mention user interactions only when they point to a substantive "
+                "research question. Do not include stage directions, markdown, or speaker labels inside "
+                "`text`. Keep each turn concise enough for text-to-speech."
             ),
             tools=[],
             tool_choice=None,
@@ -4314,12 +4320,17 @@ class PaperbaseService:
         return [
             {
                 "speaker": "noob",
-                "text": "I am completely new to this project. What is the main point I should understand?",
+                "text": (
+                    "I am completely new to this. Can we start with the basics, like what problem "
+                    "this research is trying to solve and why it is exciting?"
+                ),
             },
             {
                 "speaker": "expert",
                 "text": (
-                    "Start with the presentation summary. "
+                    "Absolutely. Think of this research area like a map for understanding a hard "
+                    "problem step by step. We will start simple, build up the main ideas, and then "
+                    "connect them back to the papers and authors behind the work. "
                     f"{self._plain_text_excerpt(summary_markdown, max_chars=3600)}"
                 ),
             },

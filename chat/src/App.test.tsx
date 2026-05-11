@@ -1550,6 +1550,8 @@ describe("App", () => {
       });
     });
     expect(await screen.findByRole("button", { name: "Regenerate presentation" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Share" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Share this presentation" })).toBeNull();
     expect(screen.queryByText("Project Presentation")).toBeNull();
     expect(await screen.findByText("Project summary")).toBeTruthy();
     const audio = await screen.findByLabelText("Presentation audio walkthrough");
