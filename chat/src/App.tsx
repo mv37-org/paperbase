@@ -7409,10 +7409,6 @@ export default function App() {
                           }
                           onCopyShareLink={copyProjectPresentationShareLink}
                         />
-                      ) : activeProjectPresentation?.status === "failed" ? (
-                        <div className="project-presentation-error">
-                          {activeProjectPresentation.error || "Presentation generation failed."}
-                        </div>
                       ) : (
                         <div className="project-presentation-empty-state">
                           <h1>Create presentation</h1>

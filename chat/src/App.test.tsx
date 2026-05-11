@@ -1528,6 +1528,34 @@ describe("App", () => {
     expect(audio.getAttribute("src")).toContain("/v1/browser/projects/proj_1/presentation/audio");
   });
 
+  it("lets the project home recover from a failed presentation", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1", "failed"),
+      error: "('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))",
+      slides: [],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("Home"));
+
+    expect(await screen.findByRole("button", { name: "Create presentation" })).toBeTruthy();
+    expect(screen.queryByText(/Connection reset by peer/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create presentation" }));
+    await waitFor(() => {
+      expect(apiMocks.startProjectPresentation).toHaveBeenCalledWith("proj_1", {
+        explorations: [],
+        regenerate: false,
+      });
+    });
+  });
+
   it("starts a paper exploration from the project exploration picker", async () => {
     apiMocks.loadSession.mockResolvedValue(authenticatedSession());
     apiMocks.suggestBrowserPapers.mockResolvedValue({
@@ -5393,6 +5421,8 @@ describe("App", () => {
   });
 
   it("shows arXiv links and raw asset previews in the admin paper modal", async () => {
+    const adminJobCreatedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const adminJobUpdatedAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     apiMocks.loadSession.mockResolvedValue(authenticatedSession({ is_admin: true }));
     apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
       jobs: [
@@ -5406,8 +5436,8 @@ describe("App", () => {
           attempts: 1,
           max_attempts: 3,
           priority: 10,
-          created_at: "2026-05-04T00:00:00Z",
-          updated_at: "2026-05-04T01:00:00Z",
+          created_at: adminJobCreatedAt,
+          updated_at: adminJobUpdatedAt,
           is_synthetic: false,
           tracking_available: true,
           indexed_paper_count: 1,
@@ -5433,8 +5463,8 @@ describe("App", () => {
           arxiv_id: "2401.00001",
           title: "Modal Paper",
           outcome: "indexed",
-          created_at: "2026-05-04T00:00:00Z",
-          updated_at: "2026-05-04T01:00:00Z",
+          created_at: adminJobCreatedAt,
+          updated_at: adminJobUpdatedAt,
           paper: null,
         },
       ],
@@ -5472,10 +5502,10 @@ describe("App", () => {
           attempts: 1,
           max_attempts: 3,
           priority: 10,
-          record_created_at: "2026-05-04T00:00:00Z",
-          record_updated_at: "2026-05-04T01:00:00Z",
-          created_at: "2026-05-04T00:00:00Z",
-          updated_at: "2026-05-04T01:00:00Z",
+          record_created_at: adminJobCreatedAt,
+          record_updated_at: adminJobUpdatedAt,
+          created_at: adminJobCreatedAt,
+          updated_at: adminJobUpdatedAt,
         },
       ],
       files: [
