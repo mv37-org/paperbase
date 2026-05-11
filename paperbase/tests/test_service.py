@@ -5896,6 +5896,79 @@ def test_project_presentation_image_slide_is_stored_and_served(monkeypatch):
     assert public_content_type == "image/png"
 
 
+def test_project_presentation_completes_when_slide_image_generation_fails(monkeypatch, caplog):
+    class ImageFallbackPresentationChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Concept Map",
+                                    "visual_code": "",
+                                    "slides": [
+                                        {
+                                            "slide_id": "concept-map",
+                                            "title": "Concept map",
+                                            "description": "A generated image should fall back to code if it times out.",
+                                            "visual_type": "image",
+                                            "visual_code": "",
+                                            "image_prompt": "Editorial research infographic, warm paper, terracotta accents.",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=ImageFallbackPresentationChatModel(),
+    )
+    caplog.set_level(logging.WARNING, logger="paperbase.service")
+    session, _ = service.register_browser_user(
+        SignupRequest(email="image-fallback@example.com", password="topsecret123", display_name="Image Fallback")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+
+    def fail_image_request(**_kwargs):
+        visible = service.get_project_presentation(session.user, project.project_id)
+        assert visible.status == "completed"
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(service, "_request_openai_presentation_image", fail_image_request)
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    completed_job = service.process_next_job()
+
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert completed.slides[0].visual_type == "code"
+    assert completed.slides[0].image_url == ""
+    assert "ReactDOM.createRoot" in completed.slides[0].visual_code
+    assert any(
+        getattr(record, "event", "") == "project.presentation.image_fallback"
+        for record in caplog.records
+    )
+
+
 def test_project_presentation_falls_back_when_model_returns_non_json(caplog):
     class NonJsonPresentationChatModel(FakeChatModel):
         def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
@@ -6080,6 +6153,109 @@ def test_project_presentation_audio_uses_saved_elevenlabs_key(monkeypatch):
     public_audio, public_content_type = service.get_public_project_presentation_audio(shared.share_token)
     assert public_audio == audio
     assert public_content_type == "audio/mpeg"
+
+
+def test_project_presentation_completes_when_elevenlabs_audio_fails(monkeypatch, caplog):
+    class AudioFallbackChatModel(FakeChatModel):
+        def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
+            if "Project presentation audio script writer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_audio_script",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_audio_script",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "turns": [
+                                        {
+                                            "speaker": "expert",
+                                            "text": "Explain the research clearly.",
+                                        }
+                                    ]
+                                }
+                            ),
+                        )
+                    ],
+                )
+            if "Research presentation designer" in prompt.base_instructions:
+                return ResponseEnvelope(
+                    response_id="resp_project_presentation",
+                    items=[
+                        ResponseItem(
+                            item_id="msg_project_presentation",
+                            item_type="message",
+                            role="assistant",
+                            content_text=json.dumps(
+                                {
+                                    "summary_markdown": "# Research brief",
+                                    "visual_code": (
+                                        "ReactDOM.createRoot(document.getElementById('root'))."
+                                        "render(React.createElement('div', null, 'visual'));"
+                                    ),
+                                    "slides": [
+                                        {
+                                            "slide_id": "brief",
+                                            "title": "Research brief",
+                                            "description": "The presentation should still complete if audio fails.",
+                                            "visual_type": "code",
+                                            "visual_code": (
+                                                "ReactDOM.createRoot(document.getElementById('root'))."
+                                                "render(React.createElement('div', null, 'visual'));"
+                                            ),
+                                            "image_prompt": "",
+                                        }
+                                    ],
+                                }
+                            ),
+                        )
+                    ],
+                )
+            return super().create_response(api_key=api_key, prompt=prompt)
+
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=AudioFallbackChatModel(),
+    )
+    caplog.set_level(logging.ERROR, logger="paperbase.service")
+    session, _ = service.register_browser_user(
+        SignupRequest(email="audio-fallback@example.com", password="topsecret123", display_name="Audio Fallback")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    service.save_user_elevenlabs_key(
+        session.user,
+        SaveElevenLabsKeyRequest(api_key="elevenlabs-user-key-999"),
+    )
+    project = service.list_projects(session.user).projects[0]
+
+    def fail_tts(**_kwargs):
+        visible = service.get_project_presentation(session.user, project.project_id)
+        assert visible.status == "completed"
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(service, "_request_elevenlabs_tts", fail_tts)
+    service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    completed_job = service.process_next_job()
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+    completed = service.get_project_presentation(session.user, project.project_id)
+    assert completed.status == "completed"
+    assert completed.audio_url == ""
+    assert "Research brief" in completed.summary_markdown
+    assert any(
+        getattr(record, "event", "") == "project.presentation.audio_fallback"
+        for record in caplog.records
+    )
 
 
 def test_project_session_paging_and_thread_deletion(browser_service):

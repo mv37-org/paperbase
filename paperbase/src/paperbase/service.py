@@ -237,6 +237,8 @@ _PROJECT_PRESENTATION_MAX_TABLE_ROWS = 4
 _PROJECT_PRESENTATION_MAX_SLIDES = 8
 _PROJECT_PRESENTATION_MAX_IMAGE_SLIDES = 3
 _PROJECT_PRESENTATION_IMAGE_MODEL = "gpt-image-2"
+_PROJECT_PRESENTATION_IMAGE_TIMEOUT_SECONDS = 45
+_PROJECT_PRESENTATION_TTS_TIMEOUT_SECONDS = 45
 _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
     "type": "json_schema",
     "name": "project_presentation",
@@ -3487,6 +3489,20 @@ class PaperbaseService:
         presentation_id: str,
         context_snapshot: dict[str, Any],
     ) -> ProjectPresentationResponse:
+        existing = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user_id,
+            project_id=project_id,
+        )
+        if existing is not None and existing.presentation_id == presentation_id and existing.status == "completed":
+            logger.info(
+                "Project presentation job already completed; skipping regeneration",
+                extra={
+                    "event": "project.presentation.already_completed",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                },
+            )
+            return self._project_presentation_with_share_url(existing)
         self.repository.set_project_presentation_running(presentation_id)  # type: ignore[attr-defined]
         user = self.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
         if user is None:
@@ -3506,9 +3522,26 @@ class PaperbaseService:
             raise PermanentError(detail)
 
         try:
+            logger.info(
+                "Project presentation generation started",
+                extra={
+                    "event": "project.presentation.generate_started",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                },
+            )
             prompt = self._project_presentation_prompt(context_snapshot)
             response = self._chat_model_create_response(api_key=api_key_value, prompt=prompt)
             response_text = self._assistant_response_text(response)
+            logger.info(
+                "Project presentation model response received",
+                extra={
+                    "event": "project.presentation.model_completed",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                    "response_length": len(response_text),
+                },
+            )
             try:
                 payload = self._parse_project_presentation_payload(response_text)
             except PermanentError as exc:
@@ -3532,38 +3565,104 @@ class PaperbaseService:
                 summary_markdown = self._project_presentation_summary_from_slides(context_snapshot, slides)
             if not visual_code:
                 visual_code = self._project_presentation_visual_from_slides(context_snapshot, slides)
-            slides = self._generate_and_store_project_presentation_slide_images(
-                api_key=api_key_value,
-                presentation_id=presentation_id,
-                slides=slides,
+            visible_slides = self._project_presentation_slides_with_image_fallbacks(
+                context_snapshot,
+                slides,
             )
-            audio_storage_path = ""
-            audio_content_type = "audio/mpeg"
-            elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
-            if elevenlabs_api_key:
-                audio_storage_path, audio_content_type = self._generate_and_store_project_presentation_audio(
-                    openai_api_key=api_key_value,
-                    elevenlabs_api_key=elevenlabs_api_key,
-                    presentation_id=presentation_id,
-                    context_snapshot=context_snapshot,
-                    summary_markdown=summary_markdown,
-                )
+            slide_payloads = [self._project_presentation_slide_storage_dict(slide) for slide in visible_slides]
             completed = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
                 presentation_id,
                 visual_code=visual_code,
                 summary_markdown=summary_markdown,
-                slides=[self._project_presentation_slide_storage_dict(slide) for slide in slides],
-                audio_storage_path=audio_storage_path,
-                audio_content_type=audio_content_type,
+                slides=slide_payloads,
+                audio_storage_path="",
+                audio_content_type="audio/mpeg",
             )
             if completed is None:
                 raise PermanentError("Presentation record disappeared")
             completed = self._project_presentation_with_share_url(completed)
+            logger.info(
+                "Project presentation content completed",
+                extra={
+                    "event": "project.presentation.content_completed",
+                    "presentation_id": presentation_id,
+                    "project_id": project_id,
+                    "slide_count": len(visible_slides),
+                },
+            )
             self._send_project_presentation_ready_email(
                 user=user,
                 project_name=project_name,
                 presentation=completed,
             )
+            if any(slide.visual_type == "image" and slide.image_prompt.strip() for slide in slides):
+                visible_slides = self._generate_and_store_project_presentation_slide_images(
+                    api_key=api_key_value,
+                    presentation_id=presentation_id,
+                    slides=slides,
+                )
+                slide_payloads = [
+                    self._project_presentation_slide_storage_dict(slide)
+                    for slide in visible_slides
+                ]
+                completed_with_images = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
+                    presentation_id,
+                    visual_code=visual_code,
+                    summary_markdown=summary_markdown,
+                    slides=slide_payloads,
+                    audio_storage_path="",
+                    audio_content_type="audio/mpeg",
+                )
+                if completed_with_images is not None:
+                    completed = self._project_presentation_with_share_url(completed_with_images)
+            audio_storage_path = ""
+            audio_content_type = "audio/mpeg"
+            elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
+            if elevenlabs_api_key:
+                try:
+                    logger.info(
+                        "Project presentation audio generation started",
+                        extra={
+                            "event": "project.presentation.audio_started",
+                            "presentation_id": presentation_id,
+                            "project_id": project_id,
+                        },
+                    )
+                    audio_storage_path, audio_content_type = self._generate_and_store_project_presentation_audio(
+                        openai_api_key=api_key_value,
+                        elevenlabs_api_key=elevenlabs_api_key,
+                        presentation_id=presentation_id,
+                        context_snapshot=context_snapshot,
+                        summary_markdown=summary_markdown,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Project presentation audio generation failed; continuing without audio",
+                        extra={
+                            "event": "project.presentation.audio_fallback",
+                            "presentation_id": presentation_id,
+                            "project_id": project_id,
+                        },
+                    )
+                else:
+                    completed_with_audio = self.repository.complete_project_presentation(  # type: ignore[attr-defined]
+                        presentation_id,
+                        visual_code=visual_code,
+                        summary_markdown=summary_markdown,
+                        slides=slide_payloads,
+                        audio_storage_path=audio_storage_path,
+                        audio_content_type=audio_content_type,
+                    )
+                    if completed_with_audio is not None:
+                        completed = self._project_presentation_with_share_url(completed_with_audio)
+                        logger.info(
+                            "Project presentation audio completed",
+                            extra={
+                                "event": "project.presentation.audio_completed",
+                                "presentation_id": presentation_id,
+                                "project_id": project_id,
+                            },
+                        )
             return completed
         except Exception as exc:
             self.repository.fail_project_presentation(presentation_id, error=str(exc))  # type: ignore[attr-defined]
@@ -3713,6 +3812,32 @@ class PaperbaseService:
             return slides
         return self._default_project_presentation_slides(context_snapshot)
 
+    def _project_presentation_slides_with_image_fallbacks(
+        self,
+        context_snapshot: dict[str, Any],
+        slides: list[ProjectPresentationSlideResponse],
+    ) -> list[ProjectPresentationSlideResponse]:
+        visible: list[ProjectPresentationSlideResponse] = []
+        for index, slide in enumerate(slides):
+            if slide.visual_type == "image" and slide.image_prompt.strip():
+                visible.append(
+                    slide.model_copy(
+                        update={
+                            "visual_type": "code",
+                            "visual_code": self._default_project_presentation_slide_visual(
+                                context_snapshot,
+                                title=slide.title,
+                                description=slide.description,
+                                index=index,
+                            ),
+                            "image_storage_path": "",
+                        }
+                    )
+                )
+                continue
+            visible.append(slide)
+        return visible
+
     def _truncate_slide_words(self, title: str, description: str) -> str:
         title_words = re.findall(r"\S+", title)
         description_words = re.findall(r"\S+", description)
@@ -3829,10 +3954,26 @@ class PaperbaseService:
                 updated.append(slide)
                 continue
             try:
+                logger.info(
+                    "Project presentation image generation started",
+                    extra={
+                        "event": "project.presentation.image_started",
+                        "presentation_id": presentation_id,
+                        "slide_id": slide.slide_id,
+                    },
+                )
                 image = self._request_openai_presentation_image(api_key=api_key, prompt=slide.image_prompt)
                 storage_path = f"project-presentations/{presentation_id}/slides/{slide.slide_id}.png"
                 self.object_store.put_bytes(storage_path, image, content_type="image/png")
                 updated.append(slide.model_copy(update={"image_storage_path": storage_path}))
+                logger.info(
+                    "Project presentation image generation completed",
+                    extra={
+                        "event": "project.presentation.image_completed",
+                        "presentation_id": presentation_id,
+                        "slide_id": slide.slide_id,
+                    },
+                )
             except Exception as exc:
                 logger.warning(
                     "Project presentation image generation failed; falling back to code visual",
@@ -3873,7 +4014,7 @@ class PaperbaseService:
                 "size": "1536x1024",
                 "quality": "medium",
             },
-            timeout=180,
+            timeout=_PROJECT_PRESENTATION_IMAGE_TIMEOUT_SECONDS,
         )
         try:
             response.raise_for_status()
@@ -4053,7 +4194,7 @@ class PaperbaseService:
             method="POST",
         )
         try:
-            with urllib_request.urlopen(request, timeout=120) as response:
+            with urllib_request.urlopen(request, timeout=_PROJECT_PRESENTATION_TTS_TIMEOUT_SECONDS) as response:
                 data = response.read()
         except urllib_error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
