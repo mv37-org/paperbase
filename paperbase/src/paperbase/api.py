@@ -1818,6 +1818,15 @@ def browser_start_project_presentation(
     return service.start_project_presentation(user, project_id, request)
 
 
+@app.post("/v1/browser/projects/{project_id}/presentation/cancel", response_model=ProjectPresentationResponse)
+def browser_cancel_project_presentation(
+    project_id: str,
+    user=Depends(require_browser_write_user),
+    service: PaperbaseService = Depends(get_service),
+) -> ProjectPresentationResponse:
+    return service.cancel_project_presentation(user, project_id)
+
+
 @app.patch("/v1/browser/projects/{project_id}/presentation/share", response_model=ProjectPresentationResponse)
 def browser_update_project_presentation_share(
     project_id: str,

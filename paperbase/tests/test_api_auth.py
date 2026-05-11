@@ -1020,6 +1020,21 @@ class StubApiService:
             completed_at=NOW,
         )
 
+    def cancel_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+    ) -> ProjectPresentationResponse:
+        self.calls.append(("cancel_project_presentation", (user.user_id, project_id)))
+        return ProjectPresentationResponse(
+            presentation_id="pres_1",
+            project_id=project_id,
+            status="canceled",
+            job_id="job_project_presentation",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
     def get_public_project_presentation(self, share_token: str) -> ProjectPresentationResponse:
         self.calls.append(("get_public_project_presentation", share_token))
         return ProjectPresentationResponse(
@@ -1873,6 +1888,10 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
         json={"explorations": [{"exploration_id": "exp_1", "paper_id": "paper_1"}], "regenerate": True},
         headers=headers,
     )
+    canceled_presentation = client.post(
+        "/v1/browser/projects/proj_2/presentation/cancel",
+        headers=headers,
+    )
     shared_presentation = client.patch(
         "/v1/browser/projects/proj_2/presentation/share",
         json={"is_public": True},
@@ -1907,6 +1926,8 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert synced_project_repo.json()["github_repo_name"] == "paperbase-general-123abc"
     assert started_presentation.status_code == 200
     assert started_presentation.json()["status"] == "pending"
+    assert canceled_presentation.status_code == 200
+    assert canceled_presentation.json()["status"] == "canceled"
     assert shared_presentation.status_code == 200
     assert shared_presentation.json()["share_token"] == "share_1"
     assert deleted_chat.json() == {"status": "deleted"}
@@ -1930,6 +1951,7 @@ def test_browser_project_and_chat_write_routes_delegate_with_valid_csrf(api_clie
     assert ("run_python_file", ("user_1", "file_1", "smoke")) in service.calls
     assert ("sync_project_repo", ("user_1", "proj_2", "Save analysis.py")) in service.calls
     assert ("start_project_presentation", ("user_1", "proj_2", True, 1)) in service.calls
+    assert ("cancel_project_presentation", ("user_1", "proj_2")) in service.calls
     assert ("update_project_presentation_share", ("user_1", "proj_2", True)) in service.calls
     assert ("delete_chat_thread", ("user_1", "thread_1")) in service.calls
     assert ("delete_project", ("user_1", "proj_2")) in service.calls

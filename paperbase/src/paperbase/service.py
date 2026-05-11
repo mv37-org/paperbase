@@ -2940,6 +2940,36 @@ class PaperbaseService:
             raise HTTPException(status_code=404, detail="Project not found")
         return self._project_presentation_with_share_url(pending)
 
+    def cancel_project_presentation(
+        self,
+        user: BrowserUser,
+        project_id: str,
+    ) -> ProjectPresentationResponse:
+        current = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user.user_id,
+            project_id=project_id,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        if current.job_id:
+            self.repository.cancel_job(current.job_id)  # type: ignore[attr-defined]
+        if current.status == "completed":
+            updated = self._update_project_presentation_progress(
+                current.presentation_id,
+                phase_key="complete",
+                phase_label="Presentation ready",
+                detail="The presentation is ready to view and share. Optional media generation was canceled.",
+                percent=100,
+                estimated_seconds_remaining=0,
+            )
+            return self._project_presentation_with_share_url(updated or current)
+        if current.status in {"failed", "canceled"}:
+            return self._project_presentation_with_share_url(current)
+        canceled = self.repository.cancel_project_presentation(current.presentation_id)  # type: ignore[attr-defined]
+        if canceled is None:
+            raise HTTPException(status_code=404, detail="Presentation not found")
+        return self._project_presentation_with_share_url(canceled)
+
     def update_project_presentation_share(
         self,
         user: BrowserUser,
@@ -3539,6 +3569,7 @@ class PaperbaseService:
                 },
             )
             prompt = self._project_presentation_prompt(context_snapshot)
+            self._raise_if_current_job_canceled()
             response = self._chat_model_create_response(api_key=api_key_value, prompt=prompt)
             response_text = self._assistant_response_text(response)
             logger.info(
@@ -3550,6 +3581,7 @@ class PaperbaseService:
                     "response_length": len(response_text),
                 },
             )
+            self._raise_if_current_job_canceled()
             self._update_project_presentation_progress(
                 presentation_id,
                 phase_key="drawing_diagrams",
@@ -3586,6 +3618,7 @@ class PaperbaseService:
                 slides,
             )
             slide_payloads = [self._project_presentation_slide_storage_dict(slide) for slide in visible_slides]
+            self._raise_if_current_job_canceled()
             self._update_project_presentation_progress(
                 presentation_id,
                 phase_key="assembling_presentation",
@@ -3604,6 +3637,8 @@ class PaperbaseService:
             )
             if completed is None:
                 raise PermanentError("Presentation record disappeared")
+            if completed.status == "canceled":
+                raise JobCanceled(f"Job canceled while saving presentation {presentation_id}")
             completed = self._project_presentation_with_share_url(completed)
             logger.info(
                 "Project presentation content completed",
@@ -3620,6 +3655,7 @@ class PaperbaseService:
                 presentation=completed,
             )
             if any(slide.visual_type == "image" and slide.image_prompt.strip() for slide in slides):
+                self._raise_if_current_job_canceled()
                 self._update_project_presentation_progress(
                     presentation_id,
                     phase_key="generating_images",
@@ -3646,12 +3682,15 @@ class PaperbaseService:
                     audio_content_type="audio/mpeg",
                 )
                 if completed_with_images is not None:
+                    if completed_with_images.status == "canceled":
+                        raise JobCanceled(f"Job canceled while saving presentation images {presentation_id}")
                     completed = self._project_presentation_with_share_url(completed_with_images)
             audio_storage_path = ""
             audio_content_type = "audio/mpeg"
             elevenlabs_api_key = self._get_elevenlabs_api_key_optional(user)
             if elevenlabs_api_key:
                 try:
+                    self._raise_if_current_job_canceled()
                     self._update_project_presentation_progress(
                         presentation_id,
                         phase_key="generating_audio",
@@ -3694,6 +3733,8 @@ class PaperbaseService:
                         audio_content_type=audio_content_type,
                     )
                     if completed_with_audio is not None:
+                        if completed_with_audio.status == "canceled":
+                            raise JobCanceled(f"Job canceled while saving presentation audio {presentation_id}")
                         completed = self._project_presentation_with_share_url(completed_with_audio)
                         logger.info(
                             "Project presentation audio completed",
@@ -3703,6 +3744,7 @@ class PaperbaseService:
                                 "project_id": project_id,
                             },
                         )
+            self._raise_if_current_job_canceled()
             progress_complete = self._update_project_presentation_progress(
                 presentation_id,
                 phase_key="complete",
@@ -3714,7 +3756,10 @@ class PaperbaseService:
             if progress_complete is not None:
                 completed = self._project_presentation_with_share_url(progress_complete)
             return completed
+        except JobCanceled:
+            raise
         except Exception as exc:
+            self._raise_if_current_job_canceled()
             self.repository.fail_project_presentation(presentation_id, error=str(exc))  # type: ignore[attr-defined]
             raise
 
@@ -4032,6 +4077,7 @@ class PaperbaseService:
             if slide.visual_type != "image" or not slide.image_prompt.strip():
                 updated.append(slide)
                 continue
+            self._raise_if_current_job_canceled()
             try:
                 logger.info(
                     "Project presentation image generation started",
@@ -4042,6 +4088,7 @@ class PaperbaseService:
                     },
                 )
                 image = self._request_openai_presentation_image(api_key=api_key, prompt=slide.image_prompt)
+                self._raise_if_current_job_canceled()
                 storage_path = f"project-presentations/{presentation_id}/slides/{slide.slide_id}.png"
                 self.object_store.put_bytes(storage_path, image, content_type="image/png")
                 updated.append(slide.model_copy(update={"image_storage_path": storage_path}))
@@ -4053,6 +4100,8 @@ class PaperbaseService:
                         "slide_id": slide.slide_id,
                     },
                 )
+            except JobCanceled:
+                raise
             except Exception as exc:
                 logger.warning(
                     "Project presentation image generation failed; falling back to code visual",
@@ -4125,13 +4174,13 @@ class PaperbaseService:
         audio_segments: list[bytes] = []
         for segment in self._project_presentation_audio_segments(script_turns):
             self._raise_if_current_job_canceled()
-            audio_segments.append(
-                self._request_elevenlabs_tts(
-                    api_key=elevenlabs_api_key,
-                    voice_id=segment["voice_id"],
-                    text=segment["text"],
-                )
+            segment_audio = self._request_elevenlabs_tts(
+                api_key=elevenlabs_api_key,
+                voice_id=segment["voice_id"],
+                text=segment["text"],
             )
+            self._raise_if_current_job_canceled()
+            audio_segments.append(segment_audio)
         if not audio_segments:
             raise PermanentError("Presentation audio script was empty")
         audio = self._stitch_audio_segments(audio_segments)
@@ -10214,6 +10263,7 @@ class PaperbaseService:
             )
         except JobCanceled:
             self.repository.mark_job_canceled(job.job_id, lease_token=job.lease_token)
+            self._sync_canceled_job_side_effects(job)
             logger.info(
                 "Canceled job",
                 extra={
@@ -10297,6 +10347,22 @@ class PaperbaseService:
             )
             return
         self.repository.fail_project_presentation(presentation_id, error=error_message)  # type: ignore[attr-defined]
+
+    def _sync_canceled_job_side_effects(self, job: JobResponse) -> None:
+        if job.job_type != "project_presentation":
+            return
+        presentation_id = str(job.payload.get("presentation_id") or "")
+        project_id = str(job.payload.get("project_id") or "")
+        user_id = str(job.payload.get("user_id") or "")
+        if not presentation_id or not project_id or not user_id:
+            return
+        current = self.repository.get_project_presentation(  # type: ignore[attr-defined]
+            user_id=user_id,
+            project_id=project_id,
+        )
+        if current is not None and current.status == "completed":
+            return
+        self.repository.cancel_project_presentation(presentation_id)  # type: ignore[attr-defined]
 
     def _project_presentation_error_message(self, exc: Exception, *, will_retry: bool) -> str:
         status_code = self._http_status_code(exc)

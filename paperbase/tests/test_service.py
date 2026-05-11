@@ -5814,6 +5814,112 @@ def test_project_presentation_job_caches_shares_and_emails():
     assert cached.job_id == completed.job_id
 
 
+def test_cancel_pending_project_presentation_allows_starting_again():
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=FakeChatModel(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="cancel-present@example.com", password="topsecret123", display_name="Cancel Presenter")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    canceled = service.cancel_project_presentation(session.user, project.project_id)
+
+    assert canceled.presentation_id == queued.presentation_id
+    assert canceled.status == "canceled"
+    assert canceled.error == ""
+    assert canceled.progress.phase_key == "canceled"
+    assert queued.job_id is not None
+    canceled_job = service.repository.get_job(queued.job_id)
+    assert canceled_job is not None
+    assert canceled_job.status == "canceled"
+
+    restarted = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+    assert restarted.status == "pending"
+    assert restarted.presentation_id == queued.presentation_id
+    assert restarted.job_id and restarted.job_id != queued.job_id
+
+
+def test_cancel_running_project_presentation_prevents_late_model_save(monkeypatch):
+    service = PaperbaseService(
+        settings=Settings(storage_backend="memory", database_url="memory://", api_key="test-token"),
+        repository=MemoryPaperRepository(),
+        object_store=MemoryObjectStore(),
+        email_sender=FakeEmailSender(),
+        chat_model=FakeChatModel(),
+    )
+    session, _ = service.register_browser_user(
+        SignupRequest(email="cancel-running@example.com", password="topsecret123", display_name="Cancel Running")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    project = service.list_projects(session.user).projects[0]
+    queued = service.start_project_presentation(
+        session.user,
+        project.project_id,
+        ProjectPresentationStartRequest(explorations=[]),
+    )
+
+    def cancel_during_model(**_kwargs):
+        canceled = service.cancel_project_presentation(session.user, project.project_id)
+        assert canceled.status == "canceled"
+        return ResponseEnvelope(
+            response_id="resp_project_presentation",
+            items=[
+                ResponseItem(
+                    item_id="msg_project_presentation",
+                    item_type="message",
+                    role="assistant",
+                    content_text=json.dumps(
+                        {
+                            "summary_markdown": "# Should not save",
+                            "visual_code": "ReactDOM.createRoot(document.getElementById('root')).render('late');",
+                            "slides": [
+                                {
+                                    "slide_id": "late-slide",
+                                    "title": "Late slide",
+                                    "description": "This would save if cancellation were not checked.",
+                                    "visual_type": "code",
+                                    "visual_code": "ReactDOM.createRoot(document.getElementById('root')).render('late');",
+                                    "image_prompt": "",
+                                }
+                            ],
+                        }
+                    ),
+                )
+            ],
+        )
+
+    monkeypatch.setattr(service, "_chat_model_create_response", cancel_during_model)
+
+    processed = service.process_next_job()
+    assert processed is not None
+    assert processed.status == "canceled"
+    assert processed.effective_status == "canceled"
+    presentation = service.get_project_presentation(session.user, project.project_id)
+    assert presentation.presentation_id == queued.presentation_id
+    assert presentation.status == "canceled"
+    assert presentation.summary_markdown == ""
+    assert presentation.visual_code == ""
+    assert presentation.slides == []
+    assert presentation.progress.phase_key == "canceled"
+
+
 def test_project_presentation_image_slide_is_stored_and_served(monkeypatch):
     class ImageSlidePresentationChatModel(FakeChatModel):
         def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:

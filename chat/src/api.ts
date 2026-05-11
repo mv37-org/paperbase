@@ -615,6 +615,13 @@ export function startProjectPresentation(
   );
 }
 
+export function cancelProjectPresentation(projectId: string) {
+  return api<ProjectPresentationResponse>(
+    `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation/cancel`,
+    { method: "POST" },
+  );
+}
+
 export function updateProjectPresentationShare(projectId: string, isPublic: boolean) {
   return api<ProjectPresentationResponse>(
     `/v1/browser/projects/${encodeURIComponent(projectId)}/presentation/share`,

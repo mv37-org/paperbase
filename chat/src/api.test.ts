@@ -777,6 +777,7 @@ describe("chat api", () => {
       .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
       .mockResolvedValueOnce(jsonResponse(presentation))
       .mockResolvedValueOnce(jsonResponse({ ...presentation, status: "pending", job_id: "job_1" }))
+      .mockResolvedValueOnce(jsonResponse({ ...presentation, status: "canceled", job_id: "job_1" }))
       .mockResolvedValueOnce(
         jsonResponse({
           ...presentation,
@@ -807,6 +808,7 @@ describe("chat api", () => {
       ],
       regenerate: true,
     });
+    await api.cancelProjectPresentation("proj_1");
     await api.updateProjectPresentationShare("proj_1", true);
     await api.loadPublicProjectPresentation("share_1");
 
@@ -816,10 +818,13 @@ describe("chat api", () => {
     const [, startInit] = fetchMock.mock.calls[1] as FetchCall;
     expect(startInit?.method).toBe("POST");
     expect(startInit?.body).toContain('"regenerate":true');
-    const [sharePath, shareInit] = fetchMock.mock.calls[2] as FetchCall;
+    const [cancelPath, cancelInit] = fetchMock.mock.calls[2] as FetchCall;
+    expect(requestPath(cancelPath)).toBe("/v1/browser/projects/proj_1/presentation/cancel");
+    expect(cancelInit?.method).toBe("POST");
+    const [sharePath, shareInit] = fetchMock.mock.calls[3] as FetchCall;
     expect(requestPath(sharePath)).toBe("/v1/browser/projects/proj_1/presentation/share");
     expect(shareInit?.body).toBe(JSON.stringify({ is_public: true }));
-    expect(requestPath(fetchMock.mock.calls[3]?.[0] as RequestInfo)).toBe(
+    expect(requestPath(fetchMock.mock.calls[4]?.[0] as RequestInfo)).toBe(
       "/v1/browser/project-presentations/public/share_1",
     );
   });

@@ -936,7 +936,7 @@ class ProjectPresentationShareRequest(BaseModel):
     is_public: bool
 
 
-ProjectPresentationStatus = Literal["missing", "pending", "running", "completed", "failed"]
+ProjectPresentationStatus = Literal["missing", "pending", "running", "completed", "failed", "canceled"]
 
 
 ProjectPresentationSlideVisualType = Literal["code", "image"]

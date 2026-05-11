@@ -1084,7 +1084,7 @@ def _project_presentation_from_orm(
     *,
     share_url: str = "",
 ) -> ProjectPresentationResponse:
-    status = row.status if row.status in {"pending", "running", "completed", "failed"} else "failed"
+    status = row.status if row.status in {"pending", "running", "completed", "failed", "canceled"} else "failed"
     progress = row.progress if isinstance(row.progress, dict) else {}
     return ProjectPresentationResponse(
         presentation_id=row.presentation_id,
@@ -4769,6 +4769,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(ProjectPresentationORM, presentation_id)
             if row is None:
                 return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
             row.status = "running"
             row.error = ""
             row.updated_at = now
@@ -4791,6 +4793,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(ProjectPresentationORM, presentation_id)
             if row is None:
                 return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
             row.progress = _project_presentation_progress_payload(
                 phase_key=phase_key,
                 phase_label=phase_label,
@@ -4819,6 +4823,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(ProjectPresentationORM, presentation_id)
             if row is None:
                 return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
             row.status = "completed"
             row.visual_code = visual_code
             row.summary_markdown = summary_markdown
@@ -4827,6 +4833,26 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row.audio_content_type = audio_content_type or "audio/mpeg"
             row.error = ""
             row.completed_at = now
+            row.updated_at = now
+            return _project_presentation_from_orm(row)
+
+    def cancel_project_presentation(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        now = utcnow()
+        with self._session() as session:
+            row = session.get(ProjectPresentationORM, presentation_id)
+            if row is None:
+                return None
+            row.status = "canceled"
+            row.error = ""
+            row.progress = _project_presentation_progress_payload(
+                phase_key="canceled",
+                phase_label="Presentation canceled",
+                detail="Presentation creation was canceled.",
+                percent=100,
+                estimated_seconds_remaining=0,
+                updated_at=now,
+            )
+            row.completed_at = None
             row.updated_at = now
             return _project_presentation_from_orm(row)
 
@@ -4841,6 +4867,8 @@ class SqlAlchemyPaperRepository(PaperRepository):
             row = session.get(ProjectPresentationORM, presentation_id)
             if row is None:
                 return None
+            if row.status == "canceled":
+                return _project_presentation_from_orm(row)
             row.status = "failed"
             row.error = error[:4000]
             row.progress = _project_presentation_progress_payload(
@@ -7649,6 +7677,8 @@ class MemoryPaperRepository(PaperRepository):
         presentation = self.project_presentations.get(presentation_id)
         if presentation is None:
             return None
+        if presentation.status == "canceled":
+            return presentation
         updated = presentation.model_copy(update={"status": "running", "error": "", "updated_at": utcnow()})
         self.project_presentations[presentation_id] = updated
         return updated
@@ -7668,6 +7698,8 @@ class MemoryPaperRepository(PaperRepository):
         presentation = self.project_presentations.get(presentation_id)
         if presentation is None:
             return None
+        if presentation.status == "canceled":
+            return presentation
         now = utcnow()
         updated = presentation.model_copy(
             update={
@@ -7700,6 +7732,8 @@ class MemoryPaperRepository(PaperRepository):
         presentation = self.project_presentations.get(presentation_id)
         if presentation is None:
             return None
+        if presentation.status == "canceled":
+            return presentation
         now = utcnow()
         updated = presentation.model_copy(
             update={
@@ -7717,6 +7751,30 @@ class MemoryPaperRepository(PaperRepository):
         self.project_presentations[presentation_id] = updated
         return updated
 
+    def cancel_project_presentation(self, presentation_id: str) -> ProjectPresentationResponse | None:
+        presentation = self.project_presentations.get(presentation_id)
+        if presentation is None:
+            return None
+        now = utcnow()
+        updated = presentation.model_copy(
+            update={
+                "status": "canceled",
+                "error": "",
+                "progress": _project_presentation_progress_response(
+                    phase_key="canceled",
+                    phase_label="Presentation canceled",
+                    detail="Presentation creation was canceled.",
+                    percent=100,
+                    estimated_seconds_remaining=0,
+                    updated_at=now,
+                ),
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+        self.project_presentations[presentation_id] = updated
+        return updated
+
     def fail_project_presentation(
         self,
         presentation_id: str,
@@ -7726,6 +7784,8 @@ class MemoryPaperRepository(PaperRepository):
         presentation = self.project_presentations.get(presentation_id)
         if presentation is None:
             return None
+        if presentation.status == "canceled":
+            return presentation
         updated = presentation.model_copy(
             update={
                 "status": "failed",

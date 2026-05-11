@@ -548,7 +548,13 @@ export interface ProjectItemPageResponse {
   has_more: boolean;
 }
 
-export type ProjectPresentationStatus = "missing" | "pending" | "running" | "completed" | "failed";
+export type ProjectPresentationStatus =
+  | "missing"
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "canceled";
 
 export interface ProjectPresentationExplorationSnapshot {
   exploration_id: string;

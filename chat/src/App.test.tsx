@@ -43,6 +43,7 @@ const apiMocks = vi.hoisted(() => {
     browserPaperPreviewContentUrl: vi.fn(
       (paperId: string) => `/v1/browser/papers/${encodeURIComponent(paperId)}/preview/content`,
     ),
+    cancelProjectPresentation: vi.fn(),
     createPythonFile: vi.fn(),
     createProject: vi.fn(),
     createThread: vi.fn(),
@@ -156,6 +157,7 @@ vi.mock("./api", () => ({
   apiResourceUrl: apiMocks.apiResourceUrl,
   browserAdminPaperAssetContentUrl: apiMocks.browserAdminPaperAssetContentUrl,
   browserPaperPreviewContentUrl: apiMocks.browserPaperPreviewContentUrl,
+  cancelProjectPresentation: apiMocks.cancelProjectPresentation,
   createBrowserPaperComment: apiMocks.createBrowserPaperComment,
   createBrowserTrendingPaperComment: apiMocks.createBrowserTrendingPaperComment,
   createPythonFile: apiMocks.createPythonFile,
@@ -676,16 +678,24 @@ function projectPresentationResponse(projectId = "proj_1", status = "completed")
     share_token: null,
     share_url: "",
     error: "",
-    job_id: status === "pending" ? "job_1" : null,
+    job_id: status === "pending" || status === "running" ? "job_1" : null,
     progress: {
-      phase_key: status === "completed" ? "complete" : "queued",
-      phase_label: status === "completed" ? "Presentation ready" : "Queued presentation workflow",
+      phase_key:
+        status === "completed" ? "complete" : status === "canceled" ? "canceled" : "queued",
+      phase_label:
+        status === "completed"
+          ? "Presentation ready"
+          : status === "canceled"
+            ? "Presentation canceled"
+            : "Queued presentation workflow",
       detail:
         status === "completed"
           ? "The presentation is ready to view and share."
-          : "Preparing the project history for the presentation agent.",
-      percent: status === "completed" ? 100 : 4,
-      estimated_seconds_remaining: status === "completed" ? 0 : 360,
+          : status === "canceled"
+            ? "Presentation creation was canceled."
+            : "Preparing the project history for the presentation agent.",
+      percent: status === "completed" || status === "canceled" ? 100 : 4,
+      estimated_seconds_remaining: status === "completed" || status === "canceled" ? 0 : 360,
       can_leave: true,
       email_notice: "We will email you once it is done. You can leave this page.",
       updated_at: "2026-04-21T00:00:00Z",
@@ -922,6 +932,9 @@ describe("App", () => {
       summary_markdown: "",
     });
     apiMocks.startProjectPresentation.mockResolvedValue(projectPresentationResponse("proj_1"));
+    apiMocks.cancelProjectPresentation.mockResolvedValue(
+      projectPresentationResponse("proj_1", "canceled"),
+    );
     apiMocks.updateProjectPresentationShare.mockResolvedValue({
       ...projectPresentationResponse("proj_1"),
       is_public: true,
@@ -1573,6 +1586,52 @@ describe("App", () => {
       screen.getByText("We will email you once it is done. You can leave this page."),
     ).toBeTruthy();
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("12");
+  });
+
+  it("cancels an in-progress project presentation", async () => {
+    apiMocks.loadSession.mockResolvedValue(authenticatedSession());
+    apiMocks.loadProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1", "running"),
+      progress: {
+        phase_key: "drawing_diagrams",
+        phase_label: "Drawing diagrams",
+        detail: "Turning the slide plan into custom diagrams.",
+        percent: 54,
+        estimated_seconds_remaining: 180,
+        can_leave: true,
+        email_notice: "We will email you once it is done. You can leave this page.",
+        updated_at: new Date(Date.now()).toISOString(),
+      },
+    });
+    apiMocks.cancelProjectPresentation.mockResolvedValue({
+      ...projectPresentationResponse("proj_1", "canceled"),
+      slides: [],
+      progress: {
+        phase_key: "canceled",
+        phase_label: "Presentation canceled",
+        detail: "Presentation creation was canceled.",
+        percent: 100,
+        estimated_seconds_remaining: 0,
+        can_leave: true,
+        email_notice: "We will email you once it is done. You can leave this page.",
+        updated_at: new Date(Date.now()).toISOString(),
+      },
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("General")[0]).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByText("General")[0]!);
+    fireEvent.click(await screen.findByText("Home"));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel presentation" }));
+
+    await waitFor(() => {
+      expect(apiMocks.cancelProjectPresentation).toHaveBeenCalledWith("proj_1");
+    });
+    expect(await screen.findByRole("button", { name: "Create presentation" })).toBeTruthy();
+    expect(screen.queryByText("Drawing diagrams")).toBeNull();
   });
 
   it("lets the project home recover from a failed presentation", async () => {

@@ -1657,6 +1657,30 @@ body:has(.app-shell) #root {
   line-height: 1.45;
 }
 
+.project-presentation-cancel-button {
+  justify-self: start;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(27, 22, 17, 0.18);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.project-presentation-cancel-button:hover,
+.project-presentation-cancel-button:focus-visible {
+  border-color: #99582a;
+  color: #99582a;
+}
+
+.project-presentation-cancel-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
+}
+
 .project-presentation-progress-track {
   position: relative;
   height: 9px;
@@ -11144,6 +11168,7 @@ body.authenticated-theme-dark .thread-paper-cover-placeholder,
 body.authenticated-theme-dark .project-home-stat,
 body.authenticated-theme-dark .project-presentation-progress,
 body.authenticated-theme-dark .project-presentation-error,
+body.authenticated-theme-dark .project-presentation-cancel-button,
 body.authenticated-theme-dark .project-presentation-canvas,
 body.authenticated-theme-dark .project-presentation-summary,
 body.authenticated-theme-dark .project-presentation-regenerate-button,

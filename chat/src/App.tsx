@@ -12,6 +12,7 @@ import Editor, { DiffEditor } from "@monaco-editor/react";
 
 import {
   api,
+  cancelProjectPresentation,
   createPythonFile,
   createProject,
   createThread,
@@ -225,6 +226,7 @@ type ProjectPresentationState = {
   loading: boolean;
   error: string;
   sharing: boolean;
+  canceling: boolean;
 };
 
 type PublicProjectPresentationState = {
@@ -1326,6 +1328,7 @@ export default function App() {
         loading: false,
         error: "",
         sharing: false,
+        canceling: false,
       })
     : null;
   const activeProjectPresentation = activeProjectPresentationState?.presentation ?? null;
@@ -3530,6 +3533,7 @@ export default function App() {
           loading: false,
           error: "",
           sharing: false,
+          canceling: false,
         };
         return { ...current, [projectId]: updater(previous) };
       });
@@ -3546,6 +3550,7 @@ export default function App() {
           ...state,
           presentation,
           loading: false,
+          canceling: false,
           error: "",
         }));
         return presentation;
@@ -3555,6 +3560,7 @@ export default function App() {
         setProjectPresentationState(projectId, (state) => ({
           ...state,
           loading: false,
+          canceling: false,
           error: message,
         }));
         throw error;
@@ -3578,6 +3584,7 @@ export default function App() {
           ...state,
           presentation,
           loading: false,
+          canceling: false,
           error: "",
         }));
       } catch (error) {
@@ -3586,6 +3593,7 @@ export default function App() {
         setProjectPresentationState(projectId, (state) => ({
           ...state,
           loading: false,
+          canceling: false,
           error: message,
         }));
         showErrorFlash(message);
@@ -3597,6 +3605,36 @@ export default function App() {
       setProjectPresentationState,
       showErrorFlash,
     ],
+  );
+
+  const cancelProjectPresentationWorkflow = useCallback(
+    async (projectId: string) => {
+      setProjectPresentationState(projectId, (state) => ({
+        ...state,
+        canceling: true,
+        error: "",
+      }));
+      try {
+        const presentation = await cancelProjectPresentation(projectId);
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          presentation,
+          loading: false,
+          canceling: false,
+          error: "",
+        }));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Presentation could not be canceled.";
+        setProjectPresentationState(projectId, (state) => ({
+          ...state,
+          canceling: false,
+          error: message,
+        }));
+        showErrorFlash(message);
+      }
+    },
+    [setProjectPresentationState, showErrorFlash],
   );
 
   const toggleProjectPresentationShare = useCallback(
@@ -7493,6 +7531,20 @@ export default function App() {
                             {activeProjectPresentation?.progress?.email_notice ??
                               "We will email you once it is done. You can leave this page."}
                           </div>
+                          {activeProjectPresentation?.presentation_id ? (
+                            <button
+                              type="button"
+                              className="project-presentation-cancel-button"
+                              disabled={Boolean(activeProjectPresentationState?.canceling)}
+                              onClick={() =>
+                                void cancelProjectPresentationWorkflow(activeProjectHome.project_id)
+                              }
+                            >
+                              {activeProjectPresentationState?.canceling
+                                ? "Canceling..."
+                                : "Cancel presentation"}
+                            </button>
+                          ) : null}
                         </div>
                       ) : activeProjectPresentation?.status === "completed" ? (
                         <ProjectPresentationDeck
