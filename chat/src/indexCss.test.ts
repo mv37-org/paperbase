@@ -50,10 +50,18 @@ describe("index.css", () => {
       /\.trending-page-public \.trending-card\s*,\s*\.trending-page-landing \.trending-card\s*\{([^}]*)\}/,
     );
     const publicCardBlock = publicCardBlockMatch?.[1] ?? "";
+    const publicCardHoverBlockMatch = css.match(
+      /\.trending-page-public \.trending-card:hover\s*,\s*\.trending-page-public \.trending-card:focus-within\s*,\s*\.trending-page-landing \.trending-card:hover\s*,\s*\.trending-page-landing \.trending-card:focus-within\s*\{([^}]*)\}/,
+    );
+    const publicCardHoverBlock = publicCardHoverBlockMatch?.[1] ?? "";
     const publicCardCopyBlockMatch = css.match(
       /\.trending-page-public \.trending-card-copy\s*,\s*\.trending-page-landing \.trending-card-copy\s*\{([^}]*)\}/,
     );
     const publicCardCopyBlock = publicCardCopyBlockMatch?.[1] ?? "";
+    const publicCardHeroBlockMatch = css.match(
+      /\.trending-page-public \.trending-card-hero\s*,\s*\.trending-page-landing \.trending-card-hero\s*\{([^}]*)\}/,
+    );
+    const publicCardHeroBlock = publicCardHeroBlockMatch?.[1] ?? "";
     const publicCardTitleBlockMatch = css.match(
       /\.trending-page-public \.trending-card-copy h2\s*,\s*\.trending-page-landing \.trending-card-copy h2\s*\{([^}]*)\}/,
     );
@@ -125,15 +133,23 @@ describe("index.css", () => {
     expect(imageBlock).toContain("height: clamp(108px, 15vw, 132px);");
     expect(imageBlock).toContain("object-fit: contain;");
     expect(landingImageBlock).toContain("aspect-ratio: 4 / 3;");
-    expect(landingImageBlock).toContain("border-radius: 0 0 5px 5px;");
+    expect(landingImageBlock).toContain("border-width: 0 0 1px;");
+    expect(landingImageBlock).toContain("border-radius: 5px 5px 0 0;");
     expect(landingImageBlock).toContain("object-fit: cover;");
     expect(publicImageBlock).toContain("aspect-ratio: 4 / 3;");
-    expect(publicImageBlock).toContain("border-radius: 0 0 5px 5px;");
+    expect(publicImageBlock).toContain("border-width: 0 0 1px;");
+    expect(publicImageBlock).toContain("border-radius: 5px 5px 0 0;");
     expect(publicImageBlock).toContain("object-fit: cover;");
-    expect(publicCardBlock).toContain("grid-template-rows: auto minmax(0, 1fr) auto;");
+    expect(publicCardBlock).toContain("grid-template-rows: auto auto auto;");
     expect(publicCardBlock).toContain("gap: 0;");
     expect(publicCardBlock).toContain("padding: 0;");
-    expect(publicCardCopyBlock).toContain("padding: 8px 9px 7px;");
+    expect(publicCardBlock).toContain("box-shadow: none;");
+    expect(publicCardBlock).toContain("cursor: pointer;");
+    expect(publicCardHoverBlock).toContain("box-shadow: none;");
+    expect(publicCardCopyBlock).toContain("order: 2;");
+    expect(publicCardCopyBlock).toContain("padding: 14px;");
+    expect(publicCardHeroBlock).toContain("order: 1;");
+    expect(publicCardHeroBlock).toContain("align-self: start;");
     expect(publicCardTitleBlock).toContain("font-size: clamp(11px, 1.25vw, 14px);");
     expect(publicCardTitleBlock).toContain("font-weight: 650;");
     expect(publicCardMetaBlock).toContain("font-size: 11px;");

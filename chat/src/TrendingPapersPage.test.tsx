@@ -167,7 +167,7 @@ describe("TrendingPapersPage", () => {
     });
     expect(screen.getByText(/Latest shows the newest papers across the library/)).toBeTruthy();
     expect(screen.getByText(/Hottest shows the most-upvoted papers overall/)).toBeTruthy();
-    const card = document.querySelector(".trending-card");
+    const card = document.querySelector(".trending-card") as HTMLElement;
     expect(card?.querySelector(".trending-card-copy h2")?.textContent).toContain("Trending Paper");
     expect(card?.querySelector(".trending-card-hero")).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Paper" })).toBeNull();
@@ -188,7 +188,7 @@ describe("TrendingPapersPage", () => {
       );
     });
 
-    fireEvent.click(screen.getByText("Trending Paper"));
+    fireEvent.click(card);
 
     await waitFor(() => {
       expect(screen.getByText("Summary")).toBeTruthy();

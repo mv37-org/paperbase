@@ -295,7 +295,10 @@ function TrendingVoteButton({
       className={`trending-vote-button${viewerHasUpvoted ? " active" : ""}`}
       aria-label={viewerHasUpvoted ? `Remove upvote ${upvoteCount}` : `Upvote ${upvoteCount}`}
       aria-pressed={viewerHasUpvoted}
-      onClick={onClick}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
       disabled={pending}
     >
       <span className="trending-vote-chevron" aria-hidden="true" />
@@ -700,13 +703,20 @@ export function TrendingPapersPage({
                 {feed.papers.map((paper) => {
                   const votePending = votePendingPaperId === paper.paper_id;
                   return (
-                    <article key={paper.paper_id} className="trending-card">
+                    <article
+                      key={paper.paper_id}
+                      className="trending-card"
+                      onClick={() => handleOpenDetail(paper.paper_id)}
+                    >
                       <div className="trending-card-copy">
                         <h2>
                           <button
                             type="button"
                             className="trending-card-title-button"
-                            onClick={() => handleOpenDetail(paper.paper_id)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleOpenDetail(paper.paper_id);
+                            }}
                           >
                             {paper.title}
                           </button>
@@ -720,7 +730,10 @@ export function TrendingPapersPage({
                         type="button"
                         className="trending-card-hero"
                         aria-label={`Open ${paper.title} preview`}
-                        onClick={() => handleOpenDetail(paper.paper_id)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleOpenDetail(paper.paper_id);
+                        }}
                       >
                         {paper.image_url ? (
                           <img

@@ -2634,8 +2634,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-landing .trending-card-image {
   height: auto;
   aspect-ratio: 4 / 3;
-  border-width: 1px 0 0;
-  border-radius: 0 0 5px 5px;
+  border-width: 0 0 1px;
+  border-radius: 5px 5px 0 0;
   object-fit: cover;
   object-position: top center;
 }
@@ -2643,8 +2643,8 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 .trending-page-public .trending-card-image {
   height: auto;
   aspect-ratio: 4 / 3;
-  border-width: 1px 0 0;
-  border-radius: 0 0 5px 5px;
+  border-width: 0 0 1px;
+  border-radius: 5px 5px 0 0;
   object-fit: cover;
   object-position: top center;
 }
@@ -2680,21 +2680,30 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-page-public .trending-card,
 .trending-page-landing .trending-card {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto;
   align-content: stretch;
   gap: 0;
   min-height: 0;
   padding: 0;
   border-color: rgba(27, 22, 17, 0.16);
   border-radius: 6px;
-  box-shadow: 0 12px 26px rgba(27, 22, 17, 0.04);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.trending-page-public .trending-card:hover,
+.trending-page-public .trending-card:focus-within,
+.trending-page-landing .trending-card:hover,
+.trending-page-landing .trending-card:focus-within {
+  box-shadow: none;
 }
 
 .trending-page-public .trending-card-copy,
 .trending-page-landing .trending-card-copy {
   align-content: start;
   gap: 3px;
-  padding: 8px 9px 7px;
+  order: 2;
+  padding: 14px;
 }
 
 .trending-page-public .trending-card-copy h2,
@@ -2713,7 +2722,13 @@ body.authenticated-theme-dark .project-presentation-progress-step.complete span 
 
 .trending-page-public .trending-card-hero,
 .trending-page-landing .trending-card-hero {
-  align-self: end;
+  order: 1;
+  align-self: start;
+}
+
+.trending-page-public .trending-card-actions,
+.trending-page-landing .trending-card-actions {
+  order: 3;
 }
 
 .trending-card-title-button {
