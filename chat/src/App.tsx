@@ -49,6 +49,7 @@ import {
   sendThreadMessage,
   sendThreadMessageStream,
   startProjectPresentation,
+  startMv37Login,
   submitChatFeedback,
   suggestBrowserPapers,
   StreamingChatAbortError,
@@ -4602,8 +4603,20 @@ export default function App() {
     });
   }, [bootstrapAuthenticatedUi, bootstrapSession, showErrorFlash, showNoteFlash]);
 
+  const redirectToMv37Login = useCallback(() => {
+    clearFlash();
+    setAuthModalOpen(false);
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+    startMv37Login();
+  }, [clearFlash]);
+
   const openAuthModal = useCallback(
     (view: AuthView, settingsTab: SettingsTab = "inference") => {
+      if (view === "login") {
+        redirectToMv37Login();
+        return;
+      }
       clearFlash();
       if (view === "settings") {
         setActiveSettingsTab(settingsTab);
@@ -4613,7 +4626,7 @@ export default function App() {
       setAccountMenuOpen(false);
       setProjectMenuProjectId(null);
     },
-    [clearFlash],
+    [clearFlash, redirectToMv37Login],
   );
 
   const openChatSetupSettings = useCallback(
@@ -6407,13 +6420,11 @@ export default function App() {
   useEffect(() => {
     const onAuthExpired = () => {
       resetAuthenticatedState();
-      showNoteFlash("Your session expired. Log in again.");
-      setAuthView("login");
-      setAuthModalOpen(true);
+      redirectToMv37Login();
     };
     window.addEventListener("paperbase:auth-expired", onAuthExpired);
     return () => window.removeEventListener("paperbase:auth-expired", onAuthExpired);
-  }, [resetAuthenticatedState, showNoteFlash]);
+  }, [redirectToMv37Login, resetAuthenticatedState]);
 
   useEffect(() => {
     if (!publicPresentationToken) {

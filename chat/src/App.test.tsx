@@ -130,6 +130,7 @@ const apiMocks = vi.hoisted(() => {
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
+    startMv37Login: vi.fn(),
     startProjectPresentation: vi.fn(),
     submitChatFeedback: vi.fn(),
     suggestBrowserPapers: vi.fn(),
@@ -214,6 +215,7 @@ vi.mock("./api", () => ({
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
+  startMv37Login: apiMocks.startMv37Login,
   startProjectPresentation: apiMocks.startProjectPresentation,
   submitChatFeedback: apiMocks.submitChatFeedback,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
@@ -1373,7 +1375,8 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Read paper" }));
 
-    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(false);
+    expect(apiMocks.startMv37Login).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
   });
 
   it("opens the public trending page from a shared browse URL", async () => {
@@ -6233,7 +6236,7 @@ describe("App", () => {
     expect(document.querySelector("#auth-modal.hidden")).toBeTruthy();
   });
 
-  it("renders MV37-only auth and keeps autocomplete hints on settings key inputs", async () => {
+  it("redirects MV37 login intents and keeps autocomplete hints on settings key inputs", async () => {
     apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
@@ -6262,9 +6265,10 @@ describe("App", () => {
       expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
     });
 
-    const loginView = document.querySelector('[data-auth-view="login"]');
-    expect(loginView?.querySelector("button")?.getAttribute("data-mv37-login")).toBe("true");
-    expect(loginView?.textContent).toContain("Continue with MV37");
+    fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+
+    expect(apiMocks.startMv37Login).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
     expect(document.querySelector("#login-form")).toBeNull();
     expect(document.querySelector("#signup-form")).toBeNull();
     expect(document.querySelector("#reset-form")).toBeNull();
@@ -6324,7 +6328,7 @@ describe("App", () => {
     ).toBe("new-password");
   });
 
-  it("renders MV37 as the only login action", async () => {
+  it("redirects unauthenticated landing prompts to MV37 auth", async () => {
     apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
@@ -6337,16 +6341,22 @@ describe("App", () => {
     await waitFor(() => {
       expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
     });
+    await waitFor(() => {
+      expect(screen.getByText("Trending Paper")).toBeTruthy();
+    });
 
-    const loginView = document.querySelector('[data-auth-view="login"]');
-    const loginFirstAction = loginView?.querySelector("button");
+    fireEvent.change(screen.getByLabelText("mention-input-landing"), {
+      target: { value: "summarize recent agent papers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
 
-    expect(loginFirstAction?.getAttribute("data-mv37-login")).toBe("true");
-    expect(loginFirstAction?.textContent).toContain("Continue with MV37");
+    expect(apiMocks.startMv37Login).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem(PENDING_PROMPT_KEY)).toContain("summarize recent agent papers");
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
     expect(document.querySelector('[data-auth-view="signup"]')).toBeNull();
     expect(document.querySelector('[data-auth-view="reset-request"]')).toBeNull();
     expect(document.querySelector('[data-auth-view="reset-password"]')).toBeNull();
-    expect(loginView?.textContent).not.toContain("Legacy Paperbase");
-    expect(loginView?.textContent).not.toContain("Continue with Google");
+    expect(document.body.textContent).not.toContain("Legacy Paperbase");
+    expect(document.body.textContent).not.toContain("Continue with Google");
   });
 });

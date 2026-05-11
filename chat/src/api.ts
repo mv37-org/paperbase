@@ -45,18 +45,33 @@ import type {
   UploadListResponse,
 } from "./types";
 
+const MV37_AUTH_LOCAL_URL = "http://127.0.0.1:8081";
+const MV37_AUTH_PROD_URL = "https://auth.mv37.org";
+const MV37_AUTH_DEFAULT_URL = import.meta.env.DEV ? MV37_AUTH_LOCAL_URL : MV37_AUTH_PROD_URL;
 const RAW_API_BASE =
   (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL ?? "";
+const RAW_MV37_AUTH_URL =
+  (window as typeof window & { PAPERBASE_MV37_AUTH_URL?: string }).PAPERBASE_MV37_AUTH_URL ?? "";
 const CONFIGURED_API_BASE =
   RAW_API_BASE && !RAW_API_BASE.startsWith("__")
     ? RAW_API_BASE
     : ((import.meta.env.VITE_PAPERBASE_BASE_URL as string | undefined) ?? "");
+const CONFIGURED_MV37_AUTH_URL =
+  RAW_MV37_AUTH_URL && !RAW_MV37_AUTH_URL.startsWith("__")
+    ? RAW_MV37_AUTH_URL
+    : ((import.meta.env.VITE_MV37_AUTH_URL as string | undefined) ?? "");
 const API_BASE = resolveApiBase(CONFIGURED_API_BASE);
+const MV37_AUTH_URL = resolveMv37AuthUrl(CONFIGURED_MV37_AUTH_URL);
 
 let browserCsrfToken: string | null = null;
 
 function apiUrl(path: string) {
   return `${API_BASE}${path}`;
+}
+
+function resolveMv37AuthUrl(configuredBase: string) {
+  const trimmed = configuredBase.trim();
+  return trimmed && !trimmed.startsWith("__") ? trimmed : MV37_AUTH_DEFAULT_URL;
 }
 
 export function apiResourceUrl(path: string) {
@@ -483,8 +498,13 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export function mv37LoginUrl() {
-  const returnTo = encodeURIComponent(window.location.origin);
-  return `${API_BASE}/v1/browser/auth/mv37/start?return_to=${returnTo}`;
+  const url = new URL(MV37_AUTH_URL, window.location.origin);
+  url.searchParams.set("return_to", window.location.origin);
+  return url.toString();
+}
+
+export function startMv37Login() {
+  window.location.href = mv37LoginUrl();
 }
 
 export function githubLoginUrl() {

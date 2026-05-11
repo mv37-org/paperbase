@@ -476,12 +476,14 @@ def home(request: Request, service: PaperbaseService = Depends(get_service)) -> 
     if not _STATIC_DIR.exists():
         return HTMLResponse("Chat frontend not built. Run `cd chat && vp build`.", status_code=503)
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    settings = get_settings()
     api_base_url = _public_base_url(request)
     bootstrap_session = _current_browser_session(request, service)
     presentation_meta = _presentation_meta_tags(request, service)
     if presentation_meta:
         html = html.replace("</title>", f"</title>\n    {presentation_meta}", 1)
     html = html.replace("__PAPERBASE_BASE_URL__", api_base_url)
+    html = html.replace('"__PAPERBASE_MV37_AUTH_URL__"', json.dumps(settings.mv37_auth_url))
     html = html.replace(
         "__PAPERBASE_BOOTSTRAP_SESSION__",
         _serialize_browser_session_for_html(bootstrap_session),

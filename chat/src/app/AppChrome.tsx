@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 
-import { mv37LoginUrl } from "../api";
+import { startMv37Login } from "../api";
 import type { ModalFlashKind } from "./appTypes";
 import { staticAssetPath } from "./appUtils";
 
@@ -48,7 +48,7 @@ export function MV37Button() {
       className="oauth-button mv37-oauth-button"
       data-mv37-login="true"
       type="button"
-      onClick={() => (window.location.href = mv37LoginUrl())}
+      onClick={startMv37Login}
     >
       <span className="mv37-oauth-mark" aria-hidden="true">
         MV
