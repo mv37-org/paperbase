@@ -5725,6 +5725,16 @@ def test_project_presentation_job_caches_shares_and_emails():
         chat_model.create_calls[-1]["system_prompt"]
     )
     assert "GPT Image 2" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "builds the visual from data arrays, D3 scales, SVG marks" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
+    assert "high information density" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "conclusion callout that points at the decisive evidence" in str(
+        chat_model.create_calls[-1]["system_prompt"]
+    )
+    assert "paperbasePresentation.size()" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "project sidebar opens or closes" in str(chat_model.create_calls[-1]["system_prompt"])
+    assert "manually hard-coded node grids" in str(chat_model.create_calls[-1]["system_prompt"])
     assert "fit inside the iframe viewport without body/page scrolling" in str(
         chat_model.create_calls[-1]["system_prompt"]
     )
@@ -5784,7 +5794,9 @@ def test_project_presentation_job_caches_shares_and_emails():
                             "visual_type": {"type": "string", "enum": ["code", "image"]},
                             "visual_code": {
                                 "type": "string",
-                                "description": "Plain browser JavaScript for code slides, otherwise empty.",
+                                "description": (
+                                    "Plain browser JavaScript for responsive D3/SVG/chart code slides, otherwise empty."
+                                ),
                             },
                             "image_prompt": {
                                 "type": "string",

@@ -285,7 +285,9 @@ _PROJECT_PRESENTATION_TEXT_FORMAT: dict[str, Any] = {
                         "visual_type": {"type": "string", "enum": ["code", "image"]},
                         "visual_code": {
                             "type": "string",
-                            "description": "Plain browser JavaScript for code slides, otherwise empty.",
+                            "description": (
+                                "Plain browser JavaScript for responsive D3/SVG/chart code slides, otherwise empty."
+                            ),
                         },
                         "image_prompt": {
                             "type": "string",
@@ -3830,7 +3832,8 @@ class PaperbaseService:
                 "\n\n"
                 "For each slide, choose exactly one visual mode. Use `visual_type: \"code\"` when an "
                 "interactive or data-driven custom visual is better; fill `visual_code` with plain browser "
-                "JavaScript. Use `visual_type: \"image\"` when a generated art image would better explain "
+                "JavaScript that builds the visual from data arrays, D3 scales, SVG marks, axes, legends, "
+                "and annotations. Use `visual_type: \"image\"` when a generated art image would better explain "
                 "the concept; leave `visual_code` empty and write an `image_prompt` for GPT Image 2. Image "
                 "prompts must ask for an editorial research infographic with on-brand restrained colors, "
                 "minimal readable labels, and no tiny body copy because image models can struggle with exact "
@@ -3840,17 +3843,24 @@ class PaperbaseService:
                 "\n\n"
                 "Code visuals must be art-directed infographics that explain the research itself, closer to "
                 "a clean print/editorial research spread, custom editorial data poster, or museum wall "
-                "graphic than a slide. Use D3 for rich "
-                "data-driven charting, scales, axes, force layouts, timelines, annotations, particles, "
-                "Voronoi/contour fields, Sankey-like flows, or transitions when useful; React can own "
-                "controls and state. Use the Paperbase brand direction: warm paper/ink foundation, restrained "
+                "graphic than a slide. They must be high information density and must directly support the "
+                "slide's stated conclusion with visible chart evidence, comparison, trend, mechanism, or "
+                "evidence map. Prefer real chart/diagram systems over manually positioned decorative boxes: "
+                "Use D3 for rich data-driven charting with scales, axes, force layouts, timelines, "
+                "annotations, Sankey-like flows, "
+                "scatter/line/bar/slope charts, heatmaps, network layouts, confidence intervals, or "
+                "small-multiple comparisons when useful; React can own controls and state. Every visual "
+                "must include a concise conclusion callout that points at the decisive evidence. Use the "
+                "Paperbase brand direction: warm paper/ink foundation, restrained "
                 "blue accents, terracotta #99582A for emphasis, crisp 4px radii, thin rules, strong "
                 "typography, and no generic dashboard chrome. The visual must fill 100% width and 100% "
                 "height of the iframe and must fit inside the iframe viewport without body/page scrolling, "
-                "clipping, or overlap. Use "
-                "responsive measurements from the container via ResizeObserver, SVG viewBox, or window "
-                "dimensions; never rely on fixed oversized canvases, min-h-screen/min-w-screen, wide CSS "
-                "grids, or off-canvas columns. Keep text to short labels and tooltips: no large paragraphs, "
+                "clipping, or overlap. Use responsive measurements from the provided "
+                "`paperbasePresentation.size()` / `paperbasePresentation.onResize(callback)` helper, "
+                "ResizeObserver, SVG viewBox, or window dimensions so charts re-render when the project "
+                "sidebar opens or closes; never rely on fixed oversized canvases, fixed pixel-only layouts, "
+                "manually hard-coded node grids, min-h-screen/min-w-screen, wide CSS grids, or off-canvas "
+                "columns. Keep text to short labels and tooltips: no large paragraphs, "
                 "no text blocks over 14 words, and all labels must be clamped or abbreviated inside the "
                 "visible bounds. Avoid decorative cards, spreadsheet-like matrices of boxes as the main "
                 "visual, filler copy, marketing layout, and generic dashboard UI. If interaction helps, add "

@@ -39,6 +39,40 @@ function projectPresentationSrcDoc(visualCode: string) {
         node.textContent = "Presentation visual failed to render.\\n" + (error && error.message ? error.message : String(error));
         root.appendChild(node);
       }
+      const presentationResizeListeners = new Set();
+      let presentationResizeFrame = 0;
+      function presentationSize() {
+        const root = document.getElementById("root");
+        const rect = root ? root.getBoundingClientRect() : { width: 0, height: 0 };
+        return {
+          width: Math.max(1, Math.round(rect.width || window.innerWidth || 1)),
+          height: Math.max(1, Math.round(rect.height || window.innerHeight || 1)),
+        };
+      }
+      function notifyPresentationResize() {
+        cancelAnimationFrame(presentationResizeFrame);
+        presentationResizeFrame = requestAnimationFrame(() => {
+          const size = presentationSize();
+          for (const listener of presentationResizeListeners) {
+            try {
+              listener(size);
+            } catch (error) {
+              console.error(error);
+            }
+          }
+          window.dispatchEvent(new CustomEvent("paperbase:presentation-resize", { detail: size }));
+          requestAnimationFrame(fitGeneratedVisual);
+        });
+      }
+      window.paperbasePresentation = {
+        size: presentationSize,
+        onResize(listener) {
+          if (typeof listener !== "function") return () => {};
+          presentationResizeListeners.add(listener);
+          listener(presentationSize());
+          return () => presentationResizeListeners.delete(listener);
+        },
+      };
       function fitGeneratedVisual() {
         const root = document.getElementById("root");
         const child = root && root.firstElementChild;
@@ -60,10 +94,13 @@ function projectPresentationSrcDoc(visualCode: string) {
         }
       }
       try {
-        const run = new Function("React", "ReactDOM", "d3", generatedCode);
-        run(window.React, window.ReactDOM, window.d3);
+        const run = new Function("React", "ReactDOM", "d3", "paperbasePresentation", generatedCode);
+        run(window.React, window.ReactDOM, window.d3, window.paperbasePresentation);
         requestAnimationFrame(fitGeneratedVisual);
         window.addEventListener("resize", fitGeneratedVisual);
+        if (typeof ResizeObserver !== "undefined") {
+          new ResizeObserver(notifyPresentationResize).observe(document.getElementById("root"));
+        }
       } catch (error) {
         showPresentationError(error);
       }
