@@ -28,11 +28,6 @@ describe("index.css", () => {
     const gridBlock = css.match(/\.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
     const landingGridBlock =
       css.match(/\.trending-page-landing \.trending-card-grid\s*\{([^}]*)\}/)?.[1] ?? "";
-    const landingCardBlock =
-      css.match(/\.trending-page-landing \.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
-    const landingEvenCardBlock =
-      css.match(/\.trending-page-landing \.trending-card:nth-child\(even\)\s*\{([^}]*)\}/)?.[1] ??
-      "";
     const workspaceTrendingBlock = css.match(/\.workspace-page-trending\s*\{([^}]*)\}/)?.[1] ?? "";
     const cardBlock = css.match(/\.trending-card\s*\{([^}]*)\}/)?.[1] ?? "";
     const imageBlock = css.match(/\.trending-card-image\s*\{([^}]*)\}/)?.[1] ?? "";
@@ -53,12 +48,10 @@ describe("index.css", () => {
     );
     expect(gridBlock).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
     expect(gridBlock).toContain("gap: 16px;");
-    expect(landingGridBlock).toContain("grid-template-columns: 1fr;");
-    expect(landingGridBlock).toContain("gap: 24px;");
-    expect(landingCardBlock).toContain('"media copy"');
-    expect(landingCardBlock).not.toContain("actions");
-    expect(landingEvenCardBlock).toContain('"media copy"');
-    expect(landingEvenCardBlock).not.toContain('"copy media"');
+    expect(landingGridBlock).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(landingGridBlock).toContain("gap: 16px;");
+    expect(css).not.toContain(".trending-page-landing .trending-card:nth-child(even)");
+    expect(css).not.toContain('"media copy"');
     expect(cardBlock).toContain("min-height: 282px;");
     expect(cardBlock).toContain('font-family: Georgia, "Times New Roman", serif;');
     expect(cardBlock).toContain("border-radius: 4px;");

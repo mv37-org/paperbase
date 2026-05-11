@@ -31,6 +31,7 @@ type TrendingPapersPageProps = {
   authenticated: boolean;
   browseState: TrendingBrowseState;
   onChangeBrowseState: (nextState: TrendingBrowseState) => void;
+  onOpenPaper?: (nextState: TrendingBrowseState) => void;
   onRequireAuth: () => void;
   feedDescription?: string | null;
   feedTitle?: string;
@@ -283,6 +284,7 @@ export function TrendingPapersPage({
   authenticated,
   browseState,
   onChangeBrowseState,
+  onOpenPaper,
   onRequireAuth,
   feedDescription,
   feedTitle = "Trending papers",
@@ -388,7 +390,12 @@ export function TrendingPapersPage({
   };
 
   const handleOpenDetail = (paperId: string) => {
-    onChangeBrowseState({ ...browseState, paperId });
+    const nextState = { ...browseState, paperId };
+    if (onOpenPaper) {
+      onOpenPaper(nextState);
+      return;
+    }
+    onChangeBrowseState(nextState);
   };
 
   const handleBackToFeed = () => {

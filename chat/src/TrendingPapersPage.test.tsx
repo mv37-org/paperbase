@@ -28,11 +28,13 @@ function Harness({
     page: 1,
     paperId: null,
   } satisfies TrendingBrowseState,
+  onOpenPaper,
   onRequireAuth = vi.fn(),
   variant = "workspace",
 }: {
   authenticated?: boolean;
   initialState?: TrendingBrowseState;
+  onOpenPaper?: (nextState: TrendingBrowseState) => void;
   onRequireAuth?: () => void;
   variant?: "landing" | "public" | "workspace";
 }) {
@@ -43,6 +45,7 @@ function Harness({
       authenticated={authenticated}
       browseState={browseState}
       onChangeBrowseState={setBrowseState}
+      onOpenPaper={onOpenPaper}
       onRequireAuth={onRequireAuth}
     />
   );
@@ -233,6 +236,26 @@ describe("TrendingPapersPage", () => {
 
     expect(screen.queryByRole("button", { name: "Upvote 12" })).toBeNull();
     expect(document.querySelector(".trending-card-actions")).toBeNull();
+  });
+
+  it("delegates landing paper clicks instead of opening detail inline", async () => {
+    const onOpenPaper = vi.fn();
+    render(<Harness authenticated={false} variant="landing" onOpenPaper={onOpenPaper} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Trending Paper")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText("Trending Paper"));
+
+    expect(onOpenPaper).toHaveBeenCalledWith({
+      date: "2026-04-21",
+      sort: "default",
+      page: 1,
+      paperId: "arxiv:2401.12345",
+    });
+    expect(apiMocks.getBrowserTrendingPaper).not.toHaveBeenCalled();
+    expect(screen.queryByText("Summary")).toBeNull();
   });
 
   it("shows the empty state when the selected day has no papers", async () => {

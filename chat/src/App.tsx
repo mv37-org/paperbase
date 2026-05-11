@@ -6601,6 +6601,7 @@ export default function App() {
                   authenticated={false}
                   browseState={landingTrendingBrowseState}
                   onChangeBrowseState={setLandingTrendingBrowseState}
+                  onOpenPaper={updateTrendingBrowseState}
                   onRequireAuth={() => openAuthModal("login")}
                   feedTitle="Trending papers"
                   feedDescription=""

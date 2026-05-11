@@ -1343,6 +1343,33 @@ describe("App", () => {
     expect(apiMocks.upvoteBrowserTrendingPaper).not.toHaveBeenCalled();
   });
 
+  it("opens a landing paper on the public trending page", async () => {
+    apiMocks.loadSession.mockResolvedValue({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Trending papers" })).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Trending Paper")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText("Trending Paper"));
+
+    await waitFor(() => {
+      expect(apiMocks.getBrowserTrendingPaper).toHaveBeenCalledWith("arxiv:2401.12345");
+    });
+    expect(window.location.search).toContain("browse=trending");
+    expect(window.location.search).toContain("trendingPaper=arxiv%3A2401.12345");
+    expect(screen.getByRole("button", { name: "Back to feed" })).toBeTruthy();
+  });
+
   it("opens the public trending page from a shared browse URL", async () => {
     window.history.replaceState({}, "", "/?browse=trending");
     apiMocks.loadSession.mockResolvedValue({
