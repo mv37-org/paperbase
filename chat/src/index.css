@@ -1782,7 +1782,8 @@ body:has(.app-shell) #root {
 
 .project-presentation-slide-canvas {
   position: relative;
-  background: #11100e;
+  border: 0;
+  background: transparent;
 }
 
 .project-presentation-visual-stage {
@@ -1807,16 +1808,18 @@ body:has(.app-shell) #root {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: #11100e;
+  background: transparent;
 }
 
 .project-presentation-fixed-header {
   position: sticky;
   top: 0;
   z-index: 2;
-  display: grid;
-  gap: 10px;
-  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--paper) 96%, transparent);
   backdrop-filter: blur(10px);
@@ -1825,20 +1828,21 @@ body:has(.app-shell) #root {
 .project-presentation-header-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .project-presentation-share-button {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: 28px;
+  padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -1849,8 +1853,8 @@ body:has(.app-shell) #root {
 }
 
 .project-presentation-inline-regenerate-button {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1886,8 +1890,8 @@ body:has(.app-shell) #root {
   scroll-snap-align: start;
   display: grid;
   align-content: center;
-  gap: 18px;
-  padding: clamp(24px, 5vw, 64px);
+  gap: 12px;
+  padding: clamp(18px, 3vw, 42px);
   color: var(--text);
 }
 
@@ -1900,12 +1904,12 @@ body:has(.app-shell) #root {
 }
 
 .project-presentation-slide-copy h1 {
-  max-width: 11ch;
+  max-width: 16ch;
   margin: 0;
   font-family: Georgia, "Iowan Old Style", serif;
-  font-size: clamp(42px, 6vw, 76px);
+  font-size: clamp(28px, 3.2vw, 44px);
   font-weight: 500;
-  line-height: 0.95;
+  line-height: 1.02;
   letter-spacing: 0;
 }
 
@@ -1914,8 +1918,8 @@ body:has(.app-shell) #root {
   margin: 0;
   color: color-mix(in srgb, var(--text) 82%, var(--muted));
   font-family: Georgia, "Iowan Old Style", serif;
-  font-size: clamp(17px, 1.45vw, 22px);
-  line-height: 1.58;
+  font-size: clamp(14px, 1vw, 17px);
+  line-height: 1.5;
 }
 
 .project-presentation-slide-dots {
@@ -1973,7 +1977,8 @@ body:has(.app-shell) #root {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
+  min-width: 0;
   margin-bottom: 0;
   padding-bottom: 0;
   border-bottom: 0;
@@ -1992,19 +1997,19 @@ body:has(.app-shell) #root {
 
 .project-presentation-audio-copy span {
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
 }
 
 .project-presentation-audio-copy small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.3;
 }
 
 .project-presentation-audio-player audio {
-  width: min(260px, 48%);
-  height: 32px;
+  width: min(220px, 42%);
+  height: 28px;
 }
 
 .project-presentation-iframe {
@@ -11187,6 +11192,12 @@ body.authenticated-theme-dark .python-conflict-file-tab {
 body.authenticated-theme-dark .project-presentation-regenerate-icon {
   filter: brightness(0) saturate(100%) invert(92%) sepia(7%) saturate(424%) hue-rotate(182deg)
     brightness(104%) contrast(96%);
+}
+
+body.authenticated-theme-dark .project-presentation-slide-canvas,
+body.authenticated-theme-dark .project-presentation-generated-image {
+  border: 0;
+  background: transparent;
 }
 
 body.authenticated-theme-dark .project-repo-menu {

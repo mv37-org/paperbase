@@ -59,4 +59,22 @@ describe("index.css", () => {
     expect(css).toContain(".trending-card-title-button");
     expect(css).toContain(".trending-vote-chevron");
   });
+
+  it("keeps project presentation chrome compact and frameless", () => {
+    const canvasBlock = css.match(/\.project-presentation-slide-canvas\s*\{([^}]*)\}/)?.[1] ?? "";
+    const headerBlock = css.match(/\.project-presentation-fixed-header\s*\{([^}]*)\}/)?.[1] ?? "";
+    const titleBlock = css.match(/\.project-presentation-slide-copy h1\s*\{([^}]*)\}/)?.[1] ?? "";
+    const copyBlock = css.match(/\.project-presentation-slide-copy p\s*\{([^}]*)\}/)?.[1] ?? "";
+    const audioBlock =
+      css.match(/\.project-presentation-audio-player audio\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(canvasBlock).toContain("border: 0;");
+    expect(canvasBlock).toContain("background: transparent;");
+    expect(headerBlock).toContain("display: flex;");
+    expect(headerBlock).toContain("padding: 6px 8px;");
+    expect(titleBlock).toContain("font-size: clamp(28px, 3.2vw, 44px);");
+    expect(copyBlock).toContain("font-size: clamp(14px, 1vw, 17px);");
+    expect(audioBlock).toContain("height: 28px;");
+    expect(css).toContain("body.authenticated-theme-dark .project-presentation-slide-canvas");
+  });
 });
