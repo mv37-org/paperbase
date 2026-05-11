@@ -7801,8 +7801,13 @@ def test_sync_latest_yields_to_queued_project_presentation(monkeypatch):
             )
         ]
 
+    enrich_calls = []
+
+    def enrich(papers, *args, **kwargs):
+        enrich_calls.append(kwargs)
+
     monkeypatch.setattr("paperbase.service.sources.fetch_recent", fetch_recent)
-    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, *args, **kwargs: None)
+    monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", enrich)
 
     processed = service.process_next_job()
 
@@ -7812,6 +7817,13 @@ def test_sync_latest_yields_to_queued_project_presentation(monkeypatch):
     assert processed.attempts == 0
     assert processed.next_run_at is not None
     assert processed.error is None
+    assert enrich_calls == [
+        {
+            "max_retries": 1,
+            "base_backoff_seconds": 0.5,
+            "inter_batch_sleep_seconds": 0.0,
+        }
+    ]
 
     next_claim = service.repository.claim_pending_job()
     assert next_claim is not None

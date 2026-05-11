@@ -11576,7 +11576,12 @@ class PaperbaseService:
             self._raise_if_current_job_canceled()
             self._yield_if_higher_priority_job_waiting()
             papers = sources.fetch_recent(category, days=days, max_results=limit_per_category)
-            sources.enrich_with_semantic_scholar(papers)
+            sources.enrich_with_semantic_scholar(
+                papers,
+                max_retries=1,
+                base_backoff_seconds=0.5,
+                inter_batch_sleep_seconds=0.0,
+            )
             for paper in papers:
                 self._raise_if_current_job_canceled()
                 self._yield_if_higher_priority_job_waiting()
