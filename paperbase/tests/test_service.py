@@ -1913,7 +1913,6 @@ def test_root_serves_built_chat_shell():
     assert "/static/app.js" in response.text
     assert "/static/app.css" in response.text
     assert "__PAPERBASE_BASE_URL__" not in response.text
-    assert "__PAPERBASE_MV37_AUTH_URL__" not in response.text
     assert "__PAPERBASE_BOOTSTRAP_SESSION__" not in response.text
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Pragma"] == "no-cache"
@@ -1932,7 +1931,6 @@ def test_root_uses_forwarded_https_base_url():
 
     assert response.status_code == 200
     assert 'window.PAPERBASE_BASE_URL = "https://paperbase-api.example.test";' in response.text
-    assert 'window.PAPERBASE_MV37_AUTH_URL = "https://auth.mv37.org";' in response.text
 
 
 def test_root_inlines_bootstrap_browser_session(browser_service):

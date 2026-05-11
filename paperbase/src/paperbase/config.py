@@ -94,7 +94,6 @@ class Settings(BaseSettings):
     admin_emails: str = Field(default="")
     resend_api_key: str | None = None
     resend_from_email: str = Field(default="Paperbase <auth@paperbase.local>")
-    mv37_auth_url: str = Field(default="https://auth.mv37.org")
     mv37_issuer_url: str | None = None
     mv37_client_id: str | None = None
     mv37_client_secret: str | None = None

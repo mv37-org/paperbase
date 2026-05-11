@@ -14,12 +14,9 @@ function requestPath(input: RequestInfo | URL) {
   return new URL(String(input), "http://localhost").pathname;
 }
 
-async function loadApiModule(options: { bootstrapSession?: unknown; mv37AuthUrl?: string } = {}) {
+async function loadApiModule(options: { bootstrapSession?: unknown } = {}) {
   vi.resetModules();
-  vi.stubEnv("VITE_MV37_AUTH_URL", "");
   (window as typeof window & { PAPERBASE_BASE_URL?: string }).PAPERBASE_BASE_URL = "";
-  (window as typeof window & { PAPERBASE_MV37_AUTH_URL?: string }).PAPERBASE_MV37_AUTH_URL =
-    options.mv37AuthUrl ?? "";
   (
     window as typeof window & { PAPERBASE_BOOTSTRAP_SESSION?: unknown }
   ).PAPERBASE_BOOTSTRAP_SESSION = options.bootstrapSession;
@@ -112,25 +109,12 @@ describe("chat api", () => {
     expect(new Headers(init?.headers).get("X-Paperbase-CSRF")).toBe("csrf-bootstrap");
   });
 
-  it("builds the local MV37 auth app login URL with a return target in dev", async () => {
+  it("builds the MV37 OAuth start URL with a return target", async () => {
     const api = await loadApiModule();
 
-    const loginUrl = new URL(api.mv37LoginUrl());
+    const loginUrl = new URL(api.mv37LoginUrl(), window.location.origin);
 
-    expect(loginUrl.origin).toBe("http://127.0.0.1:8081");
-    expect(loginUrl.searchParams.get("return_to")).toBe(window.location.origin);
-  });
-
-  it("uses the runtime MV37 auth URL when the shell injects one", async () => {
-    const api = await loadApiModule({
-      mv37AuthUrl: "https://login.example.test/start?app=paperbase",
-    });
-
-    const loginUrl = new URL(api.mv37LoginUrl());
-
-    expect(loginUrl.origin).toBe("https://login.example.test");
-    expect(loginUrl.pathname).toBe("/start");
-    expect(loginUrl.searchParams.get("app")).toBe("paperbase");
+    expect(loginUrl.pathname).toBe("/v1/browser/auth/mv37/start");
     expect(loginUrl.searchParams.get("return_to")).toBe(window.location.origin);
   });
 
