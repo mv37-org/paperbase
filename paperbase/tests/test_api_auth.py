@@ -2070,18 +2070,17 @@ class FakeMv37Client:
         }
         if claims:
             self.claims.update(claims)
-        self.code_verifier = ""
+        self.token_requested = False
         self.nonce = ""
 
     async def authorize_redirect(self, request, redirect_uri, **kwargs):
         del request
-        assert kwargs["code_challenge"]
+        assert "code_challenge" not in kwargs
         assert kwargs["code_challenge_method"] == "S256"
         assert kwargs["nonce"]
         return RedirectResponse(
             "https://auth.mv37.org/realms/mv37/protocol/openid-connect/auth"
             f"?redirect_uri={quote(redirect_uri, safe='')}"
-            f"&code_challenge={kwargs['code_challenge']}"
             f"&code_challenge_method={kwargs['code_challenge_method']}"
             f"&nonce={kwargs['nonce']}",
             status_code=302,
@@ -2089,12 +2088,12 @@ class FakeMv37Client:
 
     async def authorize_access_token(self, request, **kwargs):
         del request
-        self.code_verifier = str(kwargs.get("code_verifier") or "")
-        assert self.code_verifier
+        assert "code_verifier" not in kwargs
+        self.token_requested = True
         return {"id_token": "mv37-id-token"}
 
-    async def parse_id_token(self, request, token, nonce):
-        del request, token
+    async def parse_id_token(self, token, nonce):
+        del token
         self.nonce = nonce
         assert self.nonce
         return self.claims
@@ -2148,7 +2147,7 @@ def test_mv37_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_
     assert callback.status_code == 302
     assert callback.headers["location"] == "https://chat.example/app/?auth=mv37"
     assert "mv37-browser-token" in callback.headers["set-cookie"]
-    assert fake_client.code_verifier
+    assert fake_client.token_requested
     assert fake_client.nonce
     assert (
         "upsert_mv37_browser_user",

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 from functools import lru_cache
 import html
 import json
@@ -351,15 +349,6 @@ def get_github_oauth_client():
         client_kwargs={"scope": "repo read:user user:email"},
     )
     return oauth.create_client("github")
-
-
-def _new_pkce_verifier() -> str:
-    return secrets.token_urlsafe(64)
-
-
-def _pkce_s256_challenge(verifier: str) -> str:
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 def _validate_mv37_claims(claims: dict[str, object], settings) -> tuple[str, str, str, str]:
@@ -1349,14 +1338,11 @@ async def browser_mv37_start(request: Request, return_to: str | None = Query(def
     if client is None:
         return RedirectResponse(f"{redirect_base}/?auth_error=mv37_not_configured", status_code=302)
     redirect_uri = settings.mv37_oauth_redirect_url or str(request.url_for("browser_mv37_callback"))
-    verifier = _new_pkce_verifier()
     nonce = secrets.token_urlsafe(32)
-    request.session["browser_mv37_code_verifier"] = verifier
     request.session["browser_mv37_nonce"] = nonce
     return await client.authorize_redirect(
         request,
         redirect_uri,
-        code_challenge=_pkce_s256_challenge(verifier),
         code_challenge_method="S256",
         nonce=nonce,
     )
@@ -1373,12 +1359,11 @@ async def browser_mv37_callback(
     if client is None:
         return RedirectResponse(f"{redirect_base}/?auth_error=mv37_not_configured", status_code=302)
     try:
-        verifier = request.session.pop("browser_mv37_code_verifier", None)
         nonce = request.session.pop("browser_mv37_nonce", None)
-        if not isinstance(verifier, str) or not isinstance(nonce, str):
-            raise RuntimeError("MV37 callback was missing PKCE or nonce state")
-        token = await client.authorize_access_token(request, code_verifier=verifier)
-        claims = await client.parse_id_token(request, token, nonce=nonce)
+        if not isinstance(nonce, str):
+            raise RuntimeError("MV37 callback was missing nonce state")
+        token = await client.authorize_access_token(request)
+        claims = await client.parse_id_token(token, nonce=nonce)
         if not isinstance(claims, dict):
             raise RuntimeError("MV37 did not return ID token claims")
         issuer, subject, email, display_name = _validate_mv37_claims(claims, settings)
@@ -1394,8 +1379,10 @@ async def browser_mv37_callback(
     except HTTPException as exc:
         if exc.status_code == 409:
             return RedirectResponse(f"{redirect_base}/?auth_error=mv37_email_conflict", status_code=302)
+        logger.exception("MV37 browser callback failed", extra={"event": "mv37.oauth.callback_failed"})
         return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
     except Exception:
+        logger.exception("MV37 browser callback failed", extra={"event": "mv37.oauth.callback_failed"})
         return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
 
 
