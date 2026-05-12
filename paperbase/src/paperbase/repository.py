@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     Text,
     and_,
+    UniqueConstraint,
     create_engine,
     delete,
     func,
@@ -649,6 +650,22 @@ class GoogleIdentityORM(Base):
     google_subject: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(320), default="")
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ExternalIdentityORM(Base):
+    __tablename__ = "external_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="external_identities_issuer_subject_unique"),
+    )
+
+    external_identity_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("browser_users.user_id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    issuer: Mapped[str] = mapped_column(String(512), index=True)
+    subject: Mapped[str] = mapped_column(String(255), index=True)
+    email: Mapped[str] = mapped_column(String(320), default="")
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class BrowserSessionORM(Base):
@@ -4090,6 +4107,15 @@ class SqlAlchemyPaperRepository(PaperRepository):
             ).scalar_one_or_none()
             return _browser_user_from_orm(row) if row else None
 
+    def get_browser_user_by_external_identity(self, *, issuer: str, subject: str) -> BrowserUser | None:
+        with self._session() as session:
+            row = session.execute(
+                select(BrowserUserORM)
+                .join(ExternalIdentityORM, ExternalIdentityORM.user_id == BrowserUserORM.user_id)
+                .where(ExternalIdentityORM.issuer == issuer, ExternalIdentityORM.subject == subject)
+            ).scalar_one_or_none()
+            return _browser_user_from_orm(row) if row else None
+
     def set_browser_user_password(self, user_id: str, password_hash: str) -> BrowserUser | None:
         with self._session() as session:
             row = session.get(BrowserUserORM, user_id)
@@ -4167,6 +4193,35 @@ class SqlAlchemyPaperRepository(PaperRepository):
         statement = statement.on_conflict_do_update(
             index_elements=[GoogleIdentityORM.google_subject],
             set_={"user_id": user_id, "email": email},
+        )
+        with self._session() as session:
+            session.execute(statement)
+
+    def link_external_identity(
+        self,
+        *,
+        user_id: str,
+        provider: str,
+        issuer: str,
+        subject: str,
+        email: str,
+    ) -> None:
+        statement = insert(ExternalIdentityORM).values(
+            external_identity_id=new_id("eid"),
+            user_id=user_id,
+            provider=provider,
+            issuer=issuer,
+            subject=subject,
+            email=email,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[ExternalIdentityORM.issuer, ExternalIdentityORM.subject],
+            set_={
+                "user_id": user_id,
+                "provider": provider,
+                "email": email,
+                "updated_at": utcnow(),
+            },
         )
         with self._session() as session:
             session.execute(statement)
@@ -6312,6 +6367,7 @@ class MemoryPaperRepository(PaperRepository):
         self.browser_user_passwords: dict[str, str | None] = {}
         self.browser_users_by_email: dict[str, str] = {}
         self.google_identities: dict[str, str] = {}
+        self.external_identities: dict[tuple[str, str], str] = {}
         self.browser_sessions: dict[str, dict[str, Any]] = {}
         self.password_reset_tokens: dict[str, dict[str, Any]] = {}
         self.user_api_keys: dict[str, dict[str, str]] = {}
@@ -7274,6 +7330,10 @@ class MemoryPaperRepository(PaperRepository):
         user_id = self.google_identities.get(google_subject)
         return self.browser_users.get(user_id) if user_id else None
 
+    def get_browser_user_by_external_identity(self, *, issuer: str, subject: str) -> BrowserUser | None:
+        user_id = self.external_identities.get((issuer, subject))
+        return self.browser_users.get(user_id) if user_id else None
+
     def set_browser_user_password(self, user_id: str, password_hash: str) -> BrowserUser | None:
         user = self.browser_users.get(user_id)
         if user is None:
@@ -7314,6 +7374,18 @@ class MemoryPaperRepository(PaperRepository):
 
     def link_google_identity(self, *, user_id: str, google_subject: str, email: str) -> None:
         self.google_identities[google_subject] = user_id
+
+    def link_external_identity(
+        self,
+        *,
+        user_id: str,
+        provider: str,
+        issuer: str,
+        subject: str,
+        email: str,
+    ) -> None:
+        del provider, email
+        self.external_identities[(issuer, subject)] = user_id
 
     def save_anthropic_api_key(self, *, user_id: str, encrypted_api_key: str, hint: str) -> None:
         self.user_api_keys[user_id] = {"encrypted_api_key": encrypted_api_key, "api_key_hint": hint}

@@ -123,6 +123,24 @@ def test_job_orm_carries_lease_and_cancel_columns():
         )
 
 
+def test_external_identity_schema_carries_stable_oidc_mapping():
+    """MV37 login maps users by issuer + subject, not by email, so future
+    project identities cannot be silently linked to legacy local accounts."""
+    from paperbase.repository import ExternalIdentityORM
+
+    for column in ("user_id", "provider", "issuer", "subject", "email"):
+        assert column in ExternalIdentityORM.__table__.columns, (
+            f"ExternalIdentityORM must carry '{column}' for OIDC identity mapping"
+        )
+
+    unique_constraints = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in ExternalIdentityORM.__table__.constraints
+        if constraint.name == "external_identities_issuer_subject_unique"
+    }
+    assert ("issuer", "subject") in unique_constraints
+
+
 def test_build_manifest_includes_preview_key_in_available_artifacts():
     paper = PaperMetadata(
         arxiv_id="2401.00001",

@@ -543,6 +543,7 @@ class BrowserUserSettingsResponse(BaseModel):
     github_sync_enabled: bool = False
     github_oauth_available: bool = False
     github_manage_access_url: str = "https://github.com/settings/connections/applications"
+    mv37_oauth_available: bool = False
     weekly_papers_review_email: bool = False
     appearance_theme: Literal["light", "dark"] = "light"
 
@@ -580,23 +581,11 @@ class BrowserSessionResponse(BaseModel):
 
 
 class SignupRequest(BaseModel):
+    """Internal user factory payload; Paperbase product sign-in is MV37-only."""
+
     email: str = Field(min_length=3)
     password: str = Field(min_length=8)
     display_name: str = ""
-
-
-class LoginRequest(BaseModel):
-    email: str = Field(min_length=3)
-    password: str = Field(min_length=8)
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: str = Field(min_length=3)
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str = Field(min_length=8)
-    password: str = Field(min_length=8)
 
 
 class SaveOpenAIKeyRequest(BaseModel):

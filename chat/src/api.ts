@@ -482,9 +482,13 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload as T;
 }
 
-export function googleLoginUrl() {
+export function mv37LoginUrl() {
   const returnTo = encodeURIComponent(window.location.origin);
-  return `${API_BASE}/v1/browser/auth/google/start?return_to=${returnTo}`;
+  return `${API_BASE}/v1/browser/auth/mv37/start?return_to=${returnTo}`;
+}
+
+export function startMv37Login() {
+  window.location.href = mv37LoginUrl();
 }
 
 export function githubLoginUrl() {
@@ -496,10 +500,16 @@ export function loadSession() {
   return api<BrowserSessionResponse>("/v1/browser/session", { method: "GET" });
 }
 
+export type LogoutBrowserSessionResponse = {
+  status: string;
+  logout_url?: string;
+};
+
 export function logoutBrowserSession() {
-  return api<{ status: string }>("/v1/browser/auth/logout", { method: "POST" }).finally(
-    clearBrowserSessionToken,
-  );
+  const returnTo = encodeURIComponent(window.location.origin);
+  return api<LogoutBrowserSessionResponse>(`/v1/browser/auth/logout?return_to=${returnTo}`, {
+    method: "POST",
+  }).finally(clearBrowserSessionToken);
 }
 
 export function loadUploads() {

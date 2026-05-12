@@ -109,6 +109,39 @@ describe("chat api", () => {
     expect(new Headers(init?.headers).get("X-Paperbase-CSRF")).toBe("csrf-bootstrap");
   });
 
+  it("builds the MV37 OAuth start URL with a return target", async () => {
+    const api = await loadApiModule();
+
+    const loginUrl = new URL(api.mv37LoginUrl(), window.location.origin);
+
+    expect(loginUrl.pathname).toBe("/v1/browser/auth/mv37/start");
+    expect(loginUrl.searchParams.get("return_to")).toBe(window.location.origin);
+  });
+
+  it("sends the current origin when logging out through MV37", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          status: "ok",
+          logout_url: "https://auth.mv37.org/realms/mv37/protocol/openid-connect/logout",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const result = await api.logoutBrowserSession();
+
+    const [input, init] = fetchMock.mock.calls[0] as FetchCall;
+    const logoutUrl = new URL(String(input), window.location.origin);
+    expect(logoutUrl.pathname).toBe("/v1/browser/auth/logout");
+    expect(logoutUrl.searchParams.get("return_to")).toBe(window.location.origin);
+    expect(init?.method).toBe("POST");
+    expect(result.logout_url).toBe(
+      "https://auth.mv37.org/realms/mv37/protocol/openid-connect/logout",
+    );
+  });
+
   it("dispatches auth-expired on 401 and clears the cached CSRF token", async () => {
     const authExpired = vi.fn();
     window.addEventListener("paperbase:auth-expired", authExpired);
@@ -160,8 +193,8 @@ describe("chat api", () => {
         jsonResponse(
           {
             detail: [
-              { loc: ["body", "email"], msg: "Field required" },
-              { loc: ["body", "password"], msg: "Field required" },
+              { loc: ["body", "api_key"], msg: "Field required" },
+              { loc: ["body", "token_secret"], msg: "Field required" },
             ],
           },
           { status: 422 },
@@ -170,16 +203,16 @@ describe("chat api", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = await loadApiModule();
     const form = document.createElement("form");
-    const email = document.createElement("input");
-    email.name = "email";
-    email.value = "";
-    const password = document.createElement("input");
-    password.name = "password";
-    password.value = "";
-    form.append(email, password);
+    const apiKey = document.createElement("input");
+    apiKey.name = "api_key";
+    apiKey.value = "";
+    const tokenSecret = document.createElement("input");
+    tokenSecret.name = "token_secret";
+    tokenSecret.value = "";
+    form.append(apiKey, tokenSecret);
 
-    await expect(api.postForm("/v1/browser/auth/login", form)).rejects.toThrow(
-      "email: Field required; password: Field required",
+    await expect(api.postForm("/v1/browser/settings/openai-key", form)).rejects.toThrow(
+      "api_key: Field required; token_secret: Field required",
     );
   });
 

@@ -67,7 +67,7 @@ const apiMocks = vi.hoisted(() => {
     getPythonFile: vi.fn(),
     getThread: vi.fn(),
     githubLoginUrl: vi.fn(() => "/v1/browser/auth/github/start"),
-    googleLoginUrl: vi.fn(() => "/v1/browser/auth/google/start"),
+    mv37LoginUrl: vi.fn(() => "/v1/browser/auth/mv37/start"),
     importProjectNotebook: vi.fn(),
     loadGitHubRepositories: vi.fn(),
     loadGitHubRepoImportCandidates: vi.fn(),
@@ -130,6 +130,7 @@ const apiMocks = vi.hoisted(() => {
     runPythonFile: vi.fn(),
     sendThreadMessage: vi.fn(),
     sendThreadMessageStream: vi.fn(),
+    startMv37Login: vi.fn(),
     startProjectPresentation: vi.fn(),
     submitChatFeedback: vi.fn(),
     suggestBrowserPapers: vi.fn(),
@@ -181,7 +182,7 @@ vi.mock("./api", () => ({
   getPythonFile: apiMocks.getPythonFile,
   getThread: apiMocks.getThread,
   githubLoginUrl: apiMocks.githubLoginUrl,
-  googleLoginUrl: apiMocks.googleLoginUrl,
+  mv37LoginUrl: apiMocks.mv37LoginUrl,
   importProjectNotebook: apiMocks.importProjectNotebook,
   loadGitHubRepositories: apiMocks.loadGitHubRepositories,
   loadGitHubRepoImportCandidates: apiMocks.loadGitHubRepoImportCandidates,
@@ -214,6 +215,7 @@ vi.mock("./api", () => ({
   runPythonFile: apiMocks.runPythonFile,
   sendThreadMessage: apiMocks.sendThreadMessage,
   sendThreadMessageStream: apiMocks.sendThreadMessageStream,
+  startMv37Login: apiMocks.startMv37Login,
   startProjectPresentation: apiMocks.startProjectPresentation,
   submitChatFeedback: apiMocks.submitChatFeedback,
   suggestBrowserPapers: apiMocks.suggestBrowserPapers,
@@ -542,6 +544,7 @@ function authenticatedSession(
       github_sync_enabled: boolean;
       github_oauth_available: boolean;
       github_manage_access_url: string;
+      mv37_oauth_available: boolean;
       weekly_papers_review_email: boolean;
       appearance_theme: "light" | "dark";
     }>;
@@ -569,6 +572,7 @@ function authenticatedSession(
       github_sync_enabled: false,
       github_oauth_available: true,
       github_manage_access_url: "https://github.com/settings/connections/applications",
+      mv37_oauth_available: true,
       weekly_papers_review_email: false,
       appearance_theme: "light",
       ...overrides.settings,
@@ -907,6 +911,7 @@ describe("App", () => {
       value: vi.fn(),
     });
     apiMocks.getBootstrapSession.mockReturnValue(null);
+    apiMocks.logoutBrowserSession.mockResolvedValue({ status: "ok" });
     apiMocks.loadUploads.mockResolvedValue({ documents: [], available_tags: [] });
     apiMocks.loadProjects.mockResolvedValue({
       projects: [projectSummary("proj_1", "General")],
@@ -1371,7 +1376,8 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Read paper" }));
 
-    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(false);
+    expect(apiMocks.startMv37Login).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
   });
 
   it("opens the public trending page from a shared browse URL", async () => {
@@ -6231,7 +6237,7 @@ describe("App", () => {
     expect(document.querySelector("#auth-modal.hidden")).toBeTruthy();
   });
 
-  it("sets explicit autocomplete hints on auth and settings key inputs", async () => {
+  it("redirects MV37 login intents and keeps autocomplete hints on settings key inputs", async () => {
     apiMocks.loadSession.mockResolvedValueOnce({
       authenticated: false,
       user: null,
@@ -6248,6 +6254,7 @@ describe("App", () => {
         github_sync_enabled: false,
         github_oauth_available: false,
         github_manage_access_url: "https://github.com/settings/connections/applications",
+        mv37_oauth_available: false,
         weekly_papers_review_email: false,
         appearance_theme: "light",
       },
@@ -6259,38 +6266,14 @@ describe("App", () => {
       expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
     });
 
-    expect(
-      document.querySelector("#login-form input[name='email']")?.getAttribute("autocomplete"),
-    ).toBe("email");
-    expect(
-      document.querySelector("#login-form input[name='password']")?.getAttribute("autocomplete"),
-    ).toBe("current-password");
-    expect(
-      document.querySelector("#login-form input[name='password']")?.getAttribute("minlength"),
-    ).toBe("8");
-    expect(
-      document
-        .querySelector("#signup-form input[name='display_name']")
-        ?.getAttribute("autocomplete"),
-    ).toBe("name");
-    expect(
-      document.querySelector("#signup-form input[name='password']")?.getAttribute("autocomplete"),
-    ).toBe("new-password");
-    expect(
-      document.querySelector("#signup-form input[name='password']")?.getAttribute("minlength"),
-    ).toBe("8");
-    expect(
-      document.querySelector("#reset-form input[name='token']")?.getAttribute("autocomplete"),
-    ).toBe("one-time-code");
-    expect(
-      document.querySelector("#reset-form input[name='token']")?.getAttribute("minlength"),
-    ).toBe("8");
-    expect(
-      document.querySelector("#reset-form input[name='password']")?.getAttribute("autocomplete"),
-    ).toBe("new-password");
-    expect(
-      document.querySelector("#reset-form input[name='password']")?.getAttribute("minlength"),
-    ).toBe("8");
+    fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+
+    expect(apiMocks.startMv37Login).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
+    expect(document.body.textContent).not.toContain("Continue with MV37");
+    expect(document.querySelector("#login-form")).toBeNull();
+    expect(document.querySelector("#signup-form")).toBeNull();
+    expect(document.querySelector("#reset-form")).toBeNull();
 
     unmount();
 
@@ -6345,5 +6328,57 @@ describe("App", () => {
         .querySelector("#settings-modal-form input[name='token_secret']")
         ?.getAttribute("autocomplete"),
     ).toBe("new-password");
+  });
+
+  it("keeps the login modal closed after MV37 callback errors", async () => {
+    window.history.replaceState({}, "", "/?auth_error=mv37_callback_failed");
+    apiMocks.loadSession.mockResolvedValueOnce({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
+    expect(document.body.textContent).not.toContain("Continue with MV37");
+    expect(window.location.search).toBe("");
+  });
+
+  it("redirects unauthenticated landing prompts to MV37 auth", async () => {
+    apiMocks.loadSession.mockResolvedValueOnce({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Trending Paper")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByLabelText("mention-input-landing"), {
+      target: { value: "summarize recent agent papers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+    expect(apiMocks.startMv37Login).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem(PENDING_PROMPT_KEY)).toContain("summarize recent agent papers");
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
+    expect(document.querySelector('[data-auth-view="signup"]')).toBeNull();
+    expect(document.querySelector('[data-auth-view="reset-request"]')).toBeNull();
+    expect(document.querySelector('[data-auth-view="reset-password"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("Legacy Paperbase");
+    expect(document.body.textContent).not.toContain("Continue with Google");
   });
 });

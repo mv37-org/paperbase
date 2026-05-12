@@ -8,7 +8,9 @@ import json
 import logging
 import os
 from pathlib import Path
-from urllib.parse import urlsplit
+import secrets
+import time
+from urllib.parse import urlencode, urlsplit
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi.encoders import jsonable_encoder
@@ -51,7 +53,6 @@ from .models import (
     CreateChatThreadRequest,
     FileContentResponse,
     FileListResponse,
-    ForgotPasswordRequest,
     GitHubRepoImportCandidateResponse,
     GitHubRepoListResponse,
     GitHubRepoMetadataResponse,
@@ -61,7 +62,6 @@ from .models import (
     JobResponse,
     LiteratureShellRequest,
     LiteratureShellResponse,
-    LoginRequest,
     ManifestResponse,
     MoveChatThreadProjectRequest,
     PaperAssetResponse,
@@ -81,7 +81,6 @@ from .models import (
     ProjectSessionPageResponse,
     PythonFileResponse,
     RunPythonFileRequest,
-    ResetPasswordRequest,
     ResultSetResponse,
     RunPythonFileResponse,
     SaveElevenLabsKeyRequest,
@@ -95,7 +94,6 @@ from .models import (
     SearchSectionResponse,
     SendChatMessageRequest,
     SendChatMessageResponse,
-    SignupRequest,
     TableResponse,
     TrendingFeedResponse,
     TrendingPaperDetailResponse,
@@ -234,7 +232,7 @@ def _is_safe_return_to(value: str | None) -> bool:
 def _chat_redirect_base(request: Request, settings, *, return_to: str | None = None) -> str:
     if _is_safe_return_to(return_to):
         return return_to.rstrip("/")
-    for session_key in ("browser_google_return_to", "browser_github_return_to"):
+    for session_key in ("browser_mv37_return_to", "browser_github_return_to"):
         session_return_to = request.session.pop(session_key, None)
         if _is_safe_return_to(session_return_to):
             return session_return_to.rstrip("/")
@@ -243,6 +241,22 @@ def _chat_redirect_base(request: Request, settings, *, return_to: str | None = N
         parts = urlsplit(referer)
         return f"{parts.scheme}://{parts.netloc}"
     return settings.chat_public_url.rstrip("/")
+
+
+def _mv37_logout_url(request: Request, settings, *, id_token_hint: str | None = None) -> str | None:
+    issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
+    client_id = (settings.mv37_client_id or "").strip()
+    if not issuer or not client_id or not id_token_hint:
+        return None
+    post_logout_redirect_uri = settings.mv37_oauth_redirect_url or str(request.url_for("browser_mv37_callback"))
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "post_logout_redirect_uri": post_logout_redirect_uri,
+            "id_token_hint": id_token_hint,
+        }
+    )
+    return f"{issuer}/protocol/openid-connect/logout?{query}"
 
 
 def _sse_event(event_name: str, payload: object) -> str:
@@ -319,19 +333,20 @@ def _enqueue_harvest_venue_request(
 
 
 @lru_cache(maxsize=1)
-def get_google_oauth_client():
+def get_mv37_oauth_client():
     settings = get_settings()
-    if not settings.google_client_id or not settings.google_client_secret:
+    issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
+    if not issuer or not settings.mv37_client_id or not settings.mv37_client_secret:
         return None
     oauth = OAuth()
     oauth.register(
-        name="google",
-        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_id=settings.google_client_id,
-        client_secret=settings.google_client_secret,
-        client_kwargs={"scope": "openid email profile"},
+        name="mv37",
+        server_metadata_url=f"{issuer}/.well-known/openid-configuration",
+        client_id=settings.mv37_client_id,
+        client_secret=settings.mv37_client_secret,
+        client_kwargs={"scope": "openid email profile", "code_challenge_method": "S256"},
     )
-    return oauth.create_client("google")
+    return oauth.create_client("mv37")
 
 
 @lru_cache(maxsize=1)
@@ -350,6 +365,34 @@ def get_github_oauth_client():
         client_kwargs={"scope": "repo read:user user:email"},
     )
     return oauth.create_client("github")
+
+
+def _validate_mv37_claims(claims: dict[str, object], settings) -> tuple[str, str, str, str]:
+    expected_issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
+    issuer = str(claims.get("iss") or "").strip().rstrip("/")
+    if not expected_issuer or issuer != expected_issuer:
+        raise RuntimeError("MV37 response had an invalid issuer")
+
+    audience = claims.get("aud")
+    if isinstance(audience, str):
+        audience_values = {audience}
+    elif isinstance(audience, list):
+        audience_values = {str(value) for value in audience}
+    else:
+        audience_values = set()
+    if settings.mv37_client_id not in audience_values:
+        raise RuntimeError("MV37 response had an invalid audience")
+
+    expires_at = claims.get("exp")
+    if not isinstance(expires_at, (int, float)) or expires_at <= time.time():
+        raise RuntimeError("MV37 response was expired")
+
+    subject = str(claims.get("sub") or "").strip()
+    email = str(claims.get("email") or "").strip()
+    display_name = str(claims.get("name") or claims.get("preferred_username") or "").strip()
+    if not subject or not email:
+        raise RuntimeError("MV37 response was missing subject or email")
+    return issuer, subject, email, display_name
 
 
 def _browser_session_response_with_csrf(
@@ -1288,104 +1331,97 @@ def browser_session(
     return session
 
 
-@app.post("/v1/browser/auth/signup", response_model=BrowserSessionResponse)
-def browser_signup(
-    request: SignupRequest,
-    response: Response,
-    service: PaperbaseService = Depends(get_service),
-) -> BrowserSessionResponse:
-    session_response, raw_token = service.register_browser_user(request)
-    set_browser_session_cookie(response, raw_token, get_settings())
-    session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
-    set_no_store_headers(response)
-    return session_response
-
-
-@app.post("/v1/browser/auth/login", response_model=BrowserSessionResponse)
-def browser_login(
-    request: LoginRequest,
-    response: Response,
-    service: PaperbaseService = Depends(get_service),
-) -> BrowserSessionResponse:
-    session_response, raw_token = service.authenticate_browser_user(request)
-    set_browser_session_cookie(response, raw_token, get_settings())
-    session_response.csrf_token = csrf_token_for_session(raw_token, get_settings())
-    set_no_store_headers(response)
-    return session_response
-
-
 @app.post("/v1/browser/auth/logout")
 def browser_logout(
     request: Request,
     response: Response,
+    return_to: str | None = Query(default=None),
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> dict[str, str]:
+    settings = get_settings()
+    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
+    id_token_hint = request.session.get("browser_mv37_id_token_hint")
+    if not isinstance(id_token_hint, str) or not id_token_hint:
+        id_token_hint = None
+    logout_url = _mv37_logout_url(request, settings, id_token_hint=id_token_hint)
     service.logout_browser_session(_browser_session_token(request))
-    clear_browser_session_cookie(response, get_settings())
+    request.session.clear()
+    if logout_url:
+        request.session["browser_mv37_logout_return_to"] = redirect_base
+    else:
+        request.session["browser_mv37_prompt_login_once"] = True
+    clear_browser_session_cookie(response, settings)
     set_no_store_headers(response)
-    return {"status": "ok"}
+    payload = {"status": "ok"}
+    if logout_url:
+        payload["logout_url"] = logout_url
+    return payload
 
 
-@app.post("/v1/browser/auth/forgot-password")
-def browser_forgot_password(
-    request: ForgotPasswordRequest,
-    service: PaperbaseService = Depends(get_service),
-) -> dict[str, str]:
-    return service.request_password_reset(request)
-
-
-@app.post("/v1/browser/auth/reset-password")
-def browser_reset_password(
-    request: ResetPasswordRequest,
-    service: PaperbaseService = Depends(get_service),
-) -> dict[str, str]:
-    return service.reset_password(request)
-
-
-@app.get("/v1/browser/auth/google/start")
-async def browser_google_start(request: Request, return_to: str | None = Query(default=None)):
-    client = get_google_oauth_client()
+@app.get("/v1/browser/auth/mv37/start")
+async def browser_mv37_start(request: Request, return_to: str | None = Query(default=None)):
+    client = get_mv37_oauth_client()
     settings = get_settings()
     redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
     if _is_safe_return_to(return_to):
-        request.session["browser_google_return_to"] = return_to
+        request.session["browser_mv37_return_to"] = return_to
     if client is None:
-        return RedirectResponse(f"{redirect_base}/?auth_error=google_not_configured", status_code=302)
-    redirect_uri = settings.google_oauth_redirect_url or str(request.url_for("browser_google_callback"))
-    return await client.authorize_redirect(request, redirect_uri)
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_not_configured", status_code=302)
+    redirect_uri = settings.mv37_oauth_redirect_url or str(request.url_for("browser_mv37_callback"))
+    nonce = secrets.token_urlsafe(32)
+    request.session["browser_mv37_nonce"] = nonce
+    prompt_login = request.session.pop("browser_mv37_prompt_login_once", None) is True
+    authorize_kwargs = {"code_challenge_method": "S256", "nonce": nonce}
+    if prompt_login:
+        authorize_kwargs["prompt"] = "login"
+    return await client.authorize_redirect(
+        request,
+        redirect_uri,
+        **authorize_kwargs,
+    )
 
 
-@app.get("/v1/browser/auth/google/callback", name="browser_google_callback")
-async def browser_google_callback(
+@app.get("/v1/browser/auth/mv37/callback", name="browser_mv37_callback")
+async def browser_mv37_callback(
     request: Request,
     service: PaperbaseService = Depends(get_service),
 ):
     settings = get_settings()
-    client = get_google_oauth_client()
+    logout_return_to = request.session.pop("browser_mv37_logout_return_to", None)
+    if "code" not in request.query_params and "state" not in request.query_params and _is_safe_return_to(logout_return_to):
+        return RedirectResponse(logout_return_to.rstrip("/"), status_code=302)
+    client = get_mv37_oauth_client()
     redirect_base = _chat_redirect_base(request, settings)
     if client is None:
-        return RedirectResponse(f"{redirect_base}/?auth_error=google_not_configured", status_code=302)
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_not_configured", status_code=302)
     try:
+        nonce = request.session.pop("browser_mv37_nonce", None)
+        if not isinstance(nonce, str):
+            raise RuntimeError("MV37 callback was missing nonce state")
         token = await client.authorize_access_token(request)
-        userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
-        if not userinfo:
-            raise RuntimeError("Google did not return user info")
-        email = userinfo.get("email")
-        subject = userinfo.get("sub")
-        name = userinfo.get("name") or userinfo.get("given_name") or ""
-        if not email or not subject:
-            raise RuntimeError("Google response was missing email or subject")
-        session_response, raw_token = service.upsert_google_browser_user(
-            google_subject=subject,
+        id_token_hint = token.get("id_token") if isinstance(token, dict) else None
+        if isinstance(id_token_hint, str) and id_token_hint:
+            request.session["browser_mv37_id_token_hint"] = id_token_hint
+        claims = await client.parse_id_token(token, nonce=nonce)
+        if not isinstance(claims, dict):
+            raise RuntimeError("MV37 did not return ID token claims")
+        issuer, subject, email, display_name = _validate_mv37_claims(claims, settings)
+        _session_response, raw_token = service.upsert_mv37_browser_user(
+            issuer=issuer,
+            subject=subject,
             email=email,
-            display_name=name,
+            display_name=display_name,
         )
-        response = RedirectResponse(f"{redirect_base}/?auth=google", status_code=302)
+        response = RedirectResponse(f"{redirect_base}/?auth=mv37", status_code=302)
         set_browser_session_cookie(response, raw_token, settings)
         return response
+    except HTTPException:
+        logger.exception("MV37 browser callback failed", extra={"event": "mv37.oauth.callback_failed"})
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
     except Exception:
-        return RedirectResponse(f"{redirect_base}/?auth_error=google_callback_failed", status_code=302)
+        logger.exception("MV37 browser callback failed", extra={"event": "mv37.oauth.callback_failed"})
+        return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
 
 
 @app.get("/v1/browser/auth/github/start")

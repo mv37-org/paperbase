@@ -8,7 +8,6 @@ import hashlib
 import secrets
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
 from argon2.low_level import Type
 from cryptography.fernet import Fernet
 
@@ -20,17 +19,6 @@ _password_hasher = PasswordHasher(type=Type.ID, time_cost=3, memory_cost=65536, 
 
 def hash_password(password: str) -> str:
     return _password_hasher.hash(password)
-
-
-def verify_password(password_hash: str, password: str) -> bool:
-    try:
-        return _password_hasher.verify(password_hash, password)
-    except VerifyMismatchError:
-        return False
-
-
-def password_needs_rehash(password_hash: str) -> bool:
-    return _password_hasher.check_needs_rehash(password_hash)
 
 
 def new_browser_token() -> str:

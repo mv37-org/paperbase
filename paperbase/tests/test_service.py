@@ -6,7 +6,6 @@ import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
@@ -36,6 +35,7 @@ from paperbase.llm import (
     ResponseItem,
 )
 from paperbase.models import (
+    BrowserUser,
     ChatCitation,
     ChatThreadItemResponse,
     CreatePaperCommentRequest,
@@ -918,6 +918,28 @@ def browser_service() -> tuple[PaperbaseService, FakeEmailSender, FakeChatModel]
         github_repo_manager=FakeGitHubRepoManager(),
     )
     return service, email_sender, chat_model
+
+
+def _create_mv37_browser_session(
+    service: PaperbaseService,
+    client: TestClient,
+    *,
+    email: str,
+    display_name: str,
+) -> tuple[BrowserUser, str]:
+    session, raw_token = service.upsert_mv37_browser_user(
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject=email,
+        email=email,
+        display_name=display_name,
+    )
+    assert session.user is not None
+    client.cookies.set(service.settings.browser_session_cookie_name, raw_token)
+    current = client.get("/v1/browser/session")
+    assert current.status_code == 200
+    csrf_token = current.json()["csrf_token"]
+    assert csrf_token
+    return session.user, csrf_token
 
 
 def _sample_paper(arxiv_id: str, *, title: str, abstract: str) -> PaperMetadata:
@@ -1916,12 +1938,12 @@ def test_root_inlines_bootstrap_browser_session(browser_service):
     app.dependency_overrides[get_service] = lambda: service
     try:
         client = TestClient(app)
-
-        signup = client.post(
-            "/v1/browser/auth/signup",
-            json={"email": "inline@example.com", "password": "topsecret123", "display_name": "Inline User"},
+        _, csrf_token = _create_mv37_browser_session(
+            service,
+            client,
+            email="inline@example.com",
+            display_name="Inline User",
         )
-        csrf_token = signup.json()["csrf_token"]
 
         response = client.get("/")
 
@@ -2716,42 +2738,83 @@ def test_search_local_uses_chunk_candidates_without_grouping_before_vector_limit
     assert "GROUP BY tc.paper_id ORDER BY chunk_vector_score DESC LIMIT :candidate_pool" not in chunk_vector_sql
 
 
-def test_browser_auth_and_password_reset_flow(browser_service):
-    service, email_sender, _ = browser_service
+def test_browser_mv37_session_and_logout_flow(browser_service):
+    service, _, _ = browser_service
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "user@example.com", "password": "topsecret123", "display_name": "User"},
+    user, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="user@example.com",
+        display_name="User",
     )
-    assert signup.status_code == 200
-    assert signup.json()["authenticated"] is True
-    csrf_token = signup.json()["csrf_token"]
-    assert csrf_token
 
     session = client.get("/v1/browser/session")
+    assert session.json()["authenticated"] is True
     assert session.json()["user"]["email"] == "user@example.com"
+    assert session.json()["user"]["user_id"] == user.user_id
     assert session.json()["csrf_token"] == csrf_token
-
-    forgot = client.post("/v1/browser/auth/forgot-password", json={"email": "user@example.com"})
-    assert forgot.status_code == 200
-    assert email_sender.reset_emails
-    reset_link = email_sender.reset_emails[0][1]
-    reset_token = parse_qs(urlparse(reset_link).query)["reset_token"][0]
-
-    reset = client.post("/v1/browser/auth/reset-password", json={"token": reset_token, "password": "newsecret456"})
-    assert reset.status_code == 200
 
     logout = client.post("/v1/browser/auth/logout", headers={"X-Paperbase-CSRF": csrf_token})
     assert logout.status_code == 200
 
-    login = client.post("/v1/browser/auth/login", json={"email": "user@example.com", "password": "newsecret456"})
-    assert login.status_code == 200
-    assert login.json()["authenticated"] is True
-    assert login.json()["csrf_token"]
+    logged_out = client.get("/v1/browser/session")
+    assert logged_out.json()["authenticated"] is False
 
     app.dependency_overrides.clear()
+
+
+def test_mv37_browser_user_reuses_existing_external_identity(browser_service):
+    service, _, _ = browser_service
+
+    first, first_token = service.upsert_mv37_browser_user(
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+        email="mv37@example.com",
+        display_name="MV37 User",
+    )
+    second, second_token = service.upsert_mv37_browser_user(
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+        email="mv37@example.com",
+        display_name="Renamed User",
+    )
+
+    assert first.authenticated is True
+    assert second.authenticated is True
+    assert first.user is not None
+    assert second.user is not None
+    assert second.user.user_id == first.user.user_id
+    assert second.user.display_name == "MV37 User"
+    assert first_token != second_token
+
+
+def test_mv37_browser_user_links_existing_email_account(browser_service):
+    service, _, _ = browser_service
+    existing, _ = service.register_browser_user(
+        SignupRequest(email="conflict@example.com", password="topsecret123", display_name="Existing")
+    )
+    assert existing.user is not None
+
+    session, raw_token = service.upsert_mv37_browser_user(
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+        email="conflict@example.com",
+        display_name="MV37 User",
+    )
+
+    assert session.authenticated is True
+    assert session.user is not None
+    assert session.user.user_id == existing.user.user_id
+    assert session.user.display_name == "Existing"
+    assert raw_token
+    linked = service.repository.get_browser_user_by_external_identity(  # type: ignore[attr-defined]
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+    )
+    assert linked is not None
+    assert linked.user_id == existing.user.user_id
 
 
 def test_browser_settings_round_trip(browser_service):
@@ -5136,12 +5199,13 @@ def test_browser_uploads_and_chat_require_api_key_before_first_turn(monkeypatch,
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "chat@example.com", "password": "topsecret123", "display_name": "Chat User"},
+    _, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="chat@example.com",
+        display_name="Chat User",
     )
-    assert signup.status_code == 200
-    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
+    csrf_headers = {"X-Paperbase-CSRF": csrf_token}
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -6994,14 +7058,13 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "stream@example.com", "password": "topsecret123", "display_name": "Stream User"},
+    user, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="stream@example.com",
+        display_name="Stream User",
     )
-    assert signup.status_code == 200
-    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
-    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
-    assert user is not None
+    csrf_headers = {"X-Paperbase-CSRF": csrf_token}
     _save_browser_openai_key(service, user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
@@ -7079,13 +7142,13 @@ def test_browser_chat_stream_handles_api_key_required_without_placeholder(browse
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "stream-gated@example.com", "password": "topsecret123", "display_name": "Gated User"},
+    _, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="stream-gated@example.com",
+        display_name="Gated User",
     )
-    assert signup.status_code == 200
-    payload = signup.json()
-    csrf_headers = {"X-Paperbase-CSRF": payload["csrf_token"]}
+    csrf_headers = {"X-Paperbase-CSRF": csrf_token}
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
     thread_id = thread["thread_id"]
@@ -7112,14 +7175,13 @@ def test_browser_chat_stream_falls_back_when_provider_stream_fails_before_text(m
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "stream-fail@example.com", "password": "topsecret123", "display_name": "Fail User"},
+    user, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="stream-fail@example.com",
+        display_name="Fail User",
     )
-    assert signup.status_code == 200
-    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
-    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
-    assert user is not None
+    csrf_headers = {"X-Paperbase-CSRF": csrf_token}
     _save_browser_openai_key(service, user)
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
@@ -7191,14 +7253,13 @@ def test_browser_chat_stream_allows_project_answer_without_persisted_write(brows
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "stream-code-answer@example.com", "password": "topsecret123", "display_name": "Stream Code"},
+    user, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="stream-code-answer@example.com",
+        display_name="Stream Code",
     )
-    assert signup.status_code == 200
-    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
-    user = service.repository.get_browser_user_by_id(signup.json()["user"]["user_id"])  # type: ignore[attr-defined]
-    assert user is not None
+    csrf_headers = {"X-Paperbase-CSRF": csrf_token}
     _save_browser_openai_key(service, user)
 
     thread = client.post("/v1/browser/chats", json={"title": "New chat"}, headers=csrf_headers).json()
@@ -7311,15 +7372,13 @@ def test_browser_chat_stream_can_apply_project_edit_and_answer_in_same_loop():
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "stream-project-write@example.com", "password": "topsecret123", "display_name": "Stream Write"},
+    user, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="stream-project-write@example.com",
+        display_name="Stream Write",
     )
-    assert signup.status_code == 200
-    csrf_headers = {"X-Paperbase-CSRF": signup.json()["csrf_token"]}
-    user_id = signup.json()["user"]["user_id"]
-    user = service.repository.get_browser_user_by_id(user_id)  # type: ignore[attr-defined]
-    assert user is not None
+    csrf_headers = {"X-Paperbase-CSRF": csrf_token}
     _save_browser_openai_key(service, user)
     _connect_github(service, user)
 
@@ -7354,11 +7413,12 @@ def test_browser_paper_read_endpoints(monkeypatch, browser_service):
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "papers@example.com", "password": "topsecret123", "display_name": "Paper User"},
+    _create_mv37_browser_session(
+        service,
+        client,
+        email="papers@example.com",
+        display_name="Paper User",
     )
-    assert signup.status_code == 200
 
     monkeypatch.setattr("paperbase.service.sources.enrich_with_semantic_scholar", lambda papers, **_: None)
     monkeypatch.setattr(
@@ -7394,12 +7454,12 @@ def test_browser_write_endpoints_require_csrf(browser_service):
     app.dependency_overrides[get_service] = lambda: service
     client = TestClient(app)
 
-    signup = client.post(
-        "/v1/browser/auth/signup",
-        json={"email": "csrf@example.com", "password": "topsecret123", "display_name": "CSRF User"},
+    _, csrf_token = _create_mv37_browser_session(
+        service,
+        client,
+        email="csrf@example.com",
+        display_name="CSRF User",
     )
-    assert signup.status_code == 200
-    assert signup.json()["csrf_token"]
 
     missing_csrf = client.post("/v1/browser/chats", json={"title": "No token"})
     assert missing_csrf.status_code == 403
@@ -7408,28 +7468,10 @@ def test_browser_write_endpoints_require_csrf(browser_service):
     wrong_origin = client.post(
         "/v1/browser/chats",
         json={"title": "Wrong origin"},
-        headers={"X-Paperbase-CSRF": signup.json()["csrf_token"], "Origin": "https://evil.example"},
+        headers={"X-Paperbase-CSRF": csrf_token, "Origin": "https://evil.example"},
     )
     assert wrong_origin.status_code == 403
     assert wrong_origin.json()["detail"] == "Cross-site browser requests are not allowed"
-
-    app.dependency_overrides.clear()
-
-
-def test_browser_google_start_redirects_back_to_return_to_when_not_configured(monkeypatch, service: PaperbaseService):
-    app.dependency_overrides[get_service] = lambda: service
-    client = TestClient(app)
-
-    monkeypatch.setattr("paperbase.api.get_google_oauth_client", lambda: None)
-
-    response = client.get(
-        "/v1/browser/auth/google/start",
-        params={"return_to": "http://127.0.0.1:8080"},
-        follow_redirects=False,
-    )
-
-    assert response.status_code == 302
-    assert response.headers["location"] == "http://127.0.0.1:8080/?auth_error=google_not_configured"
 
     app.dependency_overrides.clear()
 

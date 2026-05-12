@@ -44,12 +44,12 @@ import {
   moveThreadToProject,
   renameThread,
   logoutBrowserSession,
-  postForm,
   removeUpvoteBrowserPaper,
   runPythonFile,
   sendThreadMessage,
   sendThreadMessageStream,
   startProjectPresentation,
+  startMv37Login,
   submitChatFeedback,
   suggestBrowserPapers,
   StreamingChatAbortError,
@@ -65,7 +65,6 @@ import { AdminOpsPanel } from "./AdminOpsPanel";
 import {
   AppIcon,
   EmptyStateActionIcon,
-  GoogleButton,
   MaskedAssetIcon,
   ModalFlash,
   SettingsSectionHeading,
@@ -243,17 +242,6 @@ const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
 const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
 const PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH = 310;
 const PAPER_EXPLORATION_SIDEBAR_MAX_WIDTH = PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH * 2;
-const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
-  login: { title: "Log in", caption: "Use your account to continue." },
-  signup: { title: "Create account", caption: "Create your account." },
-  "reset-request": { title: "Forgot password", caption: "Get reset link." },
-  "reset-password": { title: "Reset password", caption: "Choose a new password for your account." },
-  settings: {
-    title: "Settings",
-    caption: "Manage inference, audio, sandbox, repos, and appearance.",
-  },
-};
-
 const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
   openai_api_key_hint: "",
   anthropic_api_key_hint: "",
@@ -266,6 +254,7 @@ const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> 
   github_sync_enabled: false,
   github_oauth_available: false,
   github_manage_access_url: "https://github.com/settings/connections/applications",
+  mv37_oauth_available: false,
   weekly_papers_review_email: false,
   appearance_theme: "light",
 };
@@ -1058,7 +1047,7 @@ export default function App() {
   const [feedbackNote, setFeedbackNote] = useState("");
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
-  const [authView, setAuthView] = useState<AuthView>("login");
+  const [authView, setAuthView] = useState<AuthView>("settings");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(Boolean(bootstrapSession));
   const [publicPresentationToken] = useState(() => presentationTokenFromUrl());
@@ -1471,7 +1460,6 @@ export default function App() {
     };
   }, [emptyStateProjectPickerOpen]);
 
-  const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
   const localThreadDebugEnabled = useMemo(() => isLocalDebugHost(), []);
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
@@ -2154,12 +2142,6 @@ export default function App() {
     dismissedChatSetupSignature !== missingChatSetupSignature;
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
-  const activeSettingsConfig = useMemo(
-    () => settingsTabs.find((tab) => tab.id === activeSettingsTab) ?? settingsTabs[0],
-    [activeSettingsTab, settingsTabs],
-  );
-  const authCaption = authView === "settings" ? activeSettingsConfig.caption : authCopy.caption;
-
   useEffect(() => {
     if (!settingsTabs.some((tab) => tab.id === activeSettingsTab)) {
       setActiveSettingsTab("inference");
@@ -4512,10 +4494,6 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       const params = new URLSearchParams(window.location.search);
-      if (params.get("reset_token")) {
-        setAuthView("reset-password");
-        setAuthModalOpen(true);
-      }
       const authStatus = params.get("auth");
       const authError = params.get("auth_error");
       const settingsSection = normalizeSettingsTab(params.get("settings"));
@@ -4524,6 +4502,12 @@ export default function App() {
         setActiveSettingsTab("version-control");
         setAuthView("settings");
         setAuthModalOpen(true);
+      } else if (authStatus === "mv37") {
+        showNoteFlash("Signed in with MV37.");
+      } else if (authError === "mv37_not_configured") {
+        showErrorFlash("MV37 login is not configured yet.");
+      } else if (authError === "mv37_callback_failed") {
+        showErrorFlash("MV37 login failed. Try again.");
       } else if (authError === "github_not_configured") {
         showErrorFlash("GitHub OAuth is not configured yet.");
         setActiveSettingsTab("version-control");
@@ -4540,9 +4524,7 @@ export default function App() {
         setAuthView("settings");
         setAuthModalOpen(true);
       } else if (authError) {
-        showErrorFlash("Google login failed. Try email/password instead.");
-        setAuthView("login");
-        setAuthModalOpen(true);
+        showErrorFlash("Login failed. Try again.");
       } else if (settingsSection) {
         setActiveSettingsTab(settingsSection);
         setAuthView("settings");
@@ -4593,12 +4575,18 @@ export default function App() {
     });
   }, [bootstrapAuthenticatedUi, bootstrapSession, showErrorFlash, showNoteFlash]);
 
+  const redirectToMv37Login = useCallback(() => {
+    clearFlash();
+    setAuthModalOpen(false);
+    setAccountMenuOpen(false);
+    setProjectMenuProjectId(null);
+    startMv37Login();
+  }, [clearFlash]);
+
   const openAuthModal = useCallback(
     (view: AuthView, settingsTab: SettingsTab = "inference") => {
       clearFlash();
-      if (view === "settings") {
-        setActiveSettingsTab(settingsTab);
-      }
+      setActiveSettingsTab(settingsTab);
       setAuthView(view);
       setAuthModalOpen(true);
       setAccountMenuOpen(false);
@@ -4624,15 +4612,6 @@ export default function App() {
     }));
   }, [emptyStateProject?.project_id, missingChatSetupSignature]);
 
-  const handleAuthSuccess = useCallback(
-    async (nextSession: BrowserSessionResponse) => {
-      setSession(nextSession);
-      closeAuthModal();
-      await bootstrapAuthenticatedUi(nextSession);
-    },
-    [bootstrapAuthenticatedUi, closeAuthModal],
-  );
-
   const handleLandingSubmit = useCallback(async () => {
     const prompt = landingPrompt.trim();
     if (!prompt) {
@@ -4641,7 +4620,7 @@ export default function App() {
     const mentions = landingTags.filter((tag) => tag.id);
     if (!sessionRef.current?.authenticated) {
       rememberPendingPrompt(prompt, mentions);
-      openAuthModal("login");
+      redirectToMv37Login();
       return;
     }
     if (!requireInferenceAccess()) {
@@ -4656,7 +4635,7 @@ export default function App() {
     createNewThread,
     landingPrompt,
     landingTags,
-    openAuthModal,
+    redirectToMv37Login,
     requireInferenceAccess,
     sendMessage,
   ]);
@@ -4666,12 +4645,12 @@ export default function App() {
       const target = paperActionTargetFromTrendingDetail(detail);
       if (!sessionRef.current?.authenticated) {
         rememberPendingPaperExploration(target);
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       void startPaperExploration(target);
     },
-    [openAuthModal, startPaperExploration],
+    [redirectToMv37Login, startPaperExploration],
   );
 
   const handlePaperDiscussionVote = useCallback(async () => {
@@ -4679,7 +4658,7 @@ export default function App() {
       return;
     }
     if (!sessionRef.current?.authenticated) {
-      openAuthModal("login");
+      redirectToMv37Login();
       return;
     }
     const paperId = activePaperExploration.paperId;
@@ -4711,7 +4690,7 @@ export default function App() {
   }, [
     activePaperDiscussion.viewerHasUpvoted,
     activePaperExploration,
-    openAuthModal,
+    redirectToMv37Login,
     showErrorFlash,
   ]);
 
@@ -4754,7 +4733,7 @@ export default function App() {
         return;
       }
       if (!sessionRef.current?.authenticated) {
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       const paperId = activePaperExploration.paperId;
@@ -4769,7 +4748,7 @@ export default function App() {
         };
       });
     },
-    [activePaperExploration, openAuthModal],
+    [activePaperExploration, redirectToMv37Login],
   );
 
   const handlePaperDiscussionReplyCancel = useCallback(
@@ -4828,7 +4807,7 @@ export default function App() {
         return;
       }
       if (!sessionRef.current?.authenticated) {
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       const paperId = activePaperExploration.paperId;
@@ -4866,7 +4845,7 @@ export default function App() {
         }));
       }
     },
-    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+    [activePaperExploration, paperDiscussionStates, redirectToMv37Login, showErrorFlash],
   );
 
   const handlePaperDiscussionReplySubmit = useCallback(
@@ -4876,7 +4855,7 @@ export default function App() {
         return;
       }
       if (!sessionRef.current?.authenticated) {
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       const paperId = activePaperExploration.paperId;
@@ -4925,7 +4904,7 @@ export default function App() {
         }));
       }
     },
-    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+    [activePaperExploration, paperDiscussionStates, redirectToMv37Login, showErrorFlash],
   );
 
   const handleUpload = useCallback(
@@ -6400,20 +6379,21 @@ export default function App() {
   }, []);
 
   const handleLogout = useCallback(async () => {
-    await logoutBrowserSession();
+    const result = await logoutBrowserSession();
     resetAuthenticatedState();
+    if (result.logout_url) {
+      window.location.href = result.logout_url;
+    }
   }, [resetAuthenticatedState]);
 
   useEffect(() => {
     const onAuthExpired = () => {
       resetAuthenticatedState();
-      showNoteFlash("Your session expired. Log in again.");
-      setAuthView("login");
-      setAuthModalOpen(true);
+      redirectToMv37Login();
     };
     window.addEventListener("paperbase:auth-expired", onAuthExpired);
     return () => window.removeEventListener("paperbase:auth-expired", onAuthExpired);
-  }, [resetAuthenticatedState, showNoteFlash]);
+  }, [redirectToMv37Login, resetAuthenticatedState]);
 
   useEffect(() => {
     if (!publicPresentationToken) {
@@ -6658,7 +6638,7 @@ export default function App() {
                 browseState={trendingBrowseState}
                 onChangeBrowseState={updateTrendingBrowseState}
                 onReadPaper={handleReadTrendingPaper}
-                onRequireAuth={() => openAuthModal("login")}
+                onRequireAuth={redirectToMv37Login}
               />
             </div>
           </main>
@@ -6668,7 +6648,7 @@ export default function App() {
               id="landing-login-button"
               className="landing-login-button"
               type="button"
-              onClick={() => openAuthModal("login")}
+              onClick={redirectToMv37Login}
             >
               <span className="landing-login-icon" aria-hidden="true">
                 <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
@@ -6699,7 +6679,7 @@ export default function App() {
                 </div>
                 <LandingMentionEditor
                   attachButtonId="landing-upload-trigger"
-                  onAttach={() => openAuthModal("login")}
+                  onAttach={redirectToMv37Login}
                   onChange={setLandingPrompt}
                   onSubmit={() => void handleLandingSubmit()}
                   onTagsChange={setLandingTags}
@@ -6718,7 +6698,7 @@ export default function App() {
                   onChangeBrowseState={setLandingTrendingBrowseState}
                   onOpenPaper={updateTrendingBrowseState}
                   onReadPaper={handleReadTrendingPaper}
-                  onRequireAuth={() => openAuthModal("login")}
+                  onRequireAuth={redirectToMv37Login}
                   feedTitle="Trending papers"
                   feedDescription=""
                   pageSize={LANDING_TRENDING_PAGE_SIZE}
@@ -7503,7 +7483,7 @@ export default function App() {
                       }
                       onChangeBrowseState={(nextState) => updateTrendingBrowseState(nextState)}
                       onReadPaper={handleReadTrendingPaper}
-                      onRequireAuth={() => openAuthModal("login")}
+                      onRequireAuth={redirectToMv37Login}
                     />
                   </div>
                 ) : sessionSummary?.isAdmin ? (
@@ -10556,7 +10536,7 @@ export default function App() {
         aria-modal="true"
       >
         <div className="modal-backdrop" data-close-modal="true" onClick={closeAuthModal} />
-        <div className={`modal-panel${authView === "settings" ? " settings-modal-panel" : ""}`}>
+        <div className="modal-panel settings-modal-panel">
           <button
             className="modal-close"
             type="button"
@@ -10565,183 +10545,6 @@ export default function App() {
           >
             ×
           </button>
-          {authView === "settings" ? null : (
-            <div className="modal-heading">
-              <div className="modal-heading-copy">
-                <h2 id="auth-modal-title" className="modal-title">
-                  {authCopy.title}
-                </h2>
-                <p id="auth-modal-caption" className="modal-caption">
-                  {authCaption}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {flash && authView !== "settings" ? (
-            <ModalFlash message={flash} kind={flashKind} />
-          ) : null}
-
-          <div
-            className={`modal-view${authView === "login" ? " visible" : ""}`}
-            data-auth-view="login"
-          >
-            <form
-              id="login-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  const nextSession = (await postForm(
-                    "/v1/browser/auth/login",
-                    event.currentTarget,
-                  )) as BrowserSessionResponse;
-                  await handleAuthSuccess(nextSession);
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Login failed");
-                }
-              }}
-            >
-              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
-              <input
-                name="password"
-                type="password"
-                placeholder="Password"
-                autoComplete="current-password"
-                minLength={8}
-                required
-              />
-              <button className="primary-button" type="submit">
-                Log in
-              </button>
-            </form>
-            <GoogleButton />
-            <div className="auth-links">
-              <button type="button" className="auth-link" onClick={() => setAuthView("signup")}>
-                Create a new account
-              </button>
-              <button
-                type="button"
-                className="auth-link"
-                onClick={() => setAuthView("reset-request")}
-              >
-                Forgot password
-              </button>
-            </div>
-          </div>
-
-          <div
-            className={`modal-view${authView === "signup" ? " visible" : ""}`}
-            data-auth-view="signup"
-          >
-            <form
-              id="signup-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  const nextSession = (await postForm(
-                    "/v1/browser/auth/signup",
-                    event.currentTarget,
-                  )) as BrowserSessionResponse;
-                  await handleAuthSuccess(nextSession);
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Sign up failed");
-                }
-              }}
-            >
-              <input name="display_name" type="text" placeholder="Name" autoComplete="name" />
-              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
-              <input
-                name="password"
-                type="password"
-                placeholder="Password"
-                autoComplete="new-password"
-                minLength={8}
-                required
-              />
-              <button className="primary-button" type="submit">
-                Create account
-              </button>
-            </form>
-            <GoogleButton />
-            <div className="auth-links">
-              <button type="button" className="auth-link" onClick={() => setAuthView("login")}>
-                Already have an account? Log in
-              </button>
-            </div>
-          </div>
-
-          <div
-            className={`modal-view${authView === "reset-request" ? " visible" : ""}`}
-            data-auth-view="reset-request"
-          >
-            <form
-              id="forgot-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  await postForm("/v1/browser/auth/forgot-password", event.currentTarget);
-                  showNoteFlash("If that account exists, a reset link has been sent.");
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Password reset failed");
-                }
-              }}
-            >
-              <input name="email" type="email" placeholder="Email" autoComplete="email" required />
-              <button className="primary-button" type="submit">
-                Send reset link
-              </button>
-            </form>
-            <div className="auth-links">
-              <button type="button" className="auth-link" onClick={() => setAuthView("login")}>
-                Back to log in
-              </button>
-            </div>
-          </div>
-
-          <div
-            className={`modal-view${authView === "reset-password" ? " visible" : ""}`}
-            data-auth-view="reset-password"
-          >
-            <form
-              id="reset-form"
-              className="stack"
-              onSubmit={async (event) => {
-                event.preventDefault();
-                try {
-                  await postForm("/v1/browser/auth/reset-password", event.currentTarget);
-                  showNoteFlash("Password reset complete. You can now log in.");
-                  setAuthView("login");
-                } catch (error) {
-                  showErrorFlash(error instanceof Error ? error.message : "Password reset failed");
-                }
-              }}
-            >
-              <CredentialFormUsernameField />
-              <input
-                name="token"
-                type="text"
-                placeholder="Reset token"
-                defaultValue={new URLSearchParams(window.location.search).get("reset_token") ?? ""}
-                autoComplete="one-time-code"
-                minLength={8}
-                required
-              />
-              <input
-                name="password"
-                type="password"
-                placeholder="New password"
-                autoComplete="new-password"
-                minLength={8}
-                required
-              />
-              <button className="primary-button" type="submit">
-                Reset password
-              </button>
-            </form>
-          </div>
 
           <div
             className={`modal-view${authView === "settings" ? " visible" : ""}`}
