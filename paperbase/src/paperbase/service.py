@@ -2164,13 +2164,14 @@ class PaperbaseService:
         if user is None:
             existing = self.repository.get_browser_user_by_email(email)  # type: ignore[attr-defined]
             if existing is not None:
-                raise HTTPException(status_code=409, detail="An account with that email already exists")
-            fallback_name = email.split("@", 1)[0]
-            user = self.repository.create_browser_user(  # type: ignore[attr-defined]
-                email=email,
-                display_name=display_name.strip() or fallback_name,
-                password_hash=None,
-            )
+                user = existing
+            else:
+                fallback_name = email.split("@", 1)[0]
+                user = self.repository.create_browser_user(  # type: ignore[attr-defined]
+                    email=email,
+                    display_name=display_name.strip() or fallback_name,
+                    password_hash=None,
+                )
             self.repository.link_external_identity(  # type: ignore[attr-defined]
                 user_id=user.user_id,
                 provider="mv37",

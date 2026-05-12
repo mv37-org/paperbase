@@ -1376,9 +1376,7 @@ async def browser_mv37_callback(
         response = RedirectResponse(f"{redirect_base}/?auth=mv37", status_code=302)
         set_browser_session_cookie(response, raw_token, settings)
         return response
-    except HTTPException as exc:
-        if exc.status_code == 409:
-            return RedirectResponse(f"{redirect_base}/?auth_error=mv37_email_conflict", status_code=302)
+    except HTTPException:
         logger.exception("MV37 browser callback failed", extra={"event": "mv37.oauth.callback_failed"})
         return RedirectResponse(f"{redirect_base}/?auth_error=mv37_callback_failed", status_code=302)
     except Exception:

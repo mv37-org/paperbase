@@ -4506,10 +4506,6 @@ export default function App() {
         showNoteFlash("Signed in with MV37.");
       } else if (authError === "mv37_not_configured") {
         showErrorFlash("MV37 login is not configured yet.");
-      } else if (authError === "mv37_email_conflict") {
-        showErrorFlash(
-          "That email is tied to a legacy Paperbase account. Contact support to migrate it to MV37.",
-        );
       } else if (authError === "mv37_callback_failed") {
         showErrorFlash("MV37 login failed. Try again.");
       } else if (authError === "github_not_configured") {

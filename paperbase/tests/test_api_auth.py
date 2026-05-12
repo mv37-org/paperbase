@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 import pytest
-from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
@@ -1251,8 +1250,6 @@ class StubApiService:
         display_name: str,
     ) -> tuple[BrowserSessionResponse, str]:
         self.calls.append(("upsert_mv37_browser_user", (issuer, subject, email, display_name)))
-        if email == "conflict@example.com":
-            raise HTTPException(status_code=409, detail="An account with that email already exists")
         return (
             BrowserSessionResponse(
                 authenticated=True,
@@ -2181,7 +2178,7 @@ def test_mv37_callback_allows_unverified_email_claim(api_client, monkeypatch):
     ) in service.calls
 
 
-def test_mv37_callback_email_conflict_does_not_auto_link(api_client, monkeypatch):
+def test_mv37_callback_links_existing_email_account(api_client, monkeypatch):
     client, service, _ = api_client
     fake_client = FakeMv37Client({"email": "conflict@example.com"})
     monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
@@ -2190,7 +2187,8 @@ def test_mv37_callback_email_conflict_does_not_auto_link(api_client, monkeypatch
     response = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
 
     assert response.status_code == 302
-    assert response.headers["location"] == "https://paperbase.example/?auth_error=mv37_email_conflict"
+    assert response.headers["location"] == "https://paperbase.example/?auth=mv37"
+    assert "mv37-browser-token" in response.headers["set-cookie"]
     assert (
         "upsert_mv37_browser_user",
         (

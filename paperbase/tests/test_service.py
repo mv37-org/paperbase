@@ -2790,25 +2790,31 @@ def test_mv37_browser_user_reuses_existing_external_identity(browser_service):
     assert first_token != second_token
 
 
-def test_mv37_browser_user_email_conflict_does_not_auto_link(browser_service):
+def test_mv37_browser_user_links_existing_email_account(browser_service):
     service, _, _ = browser_service
-    service.register_browser_user(
+    existing, _ = service.register_browser_user(
         SignupRequest(email="conflict@example.com", password="topsecret123", display_name="Existing")
     )
+    assert existing.user is not None
 
-    with pytest.raises(HTTPException) as exc_info:
-        service.upsert_mv37_browser_user(
-            issuer="https://auth.mv37.org/realms/mv37",
-            subject="mv37-user-1",
-            email="conflict@example.com",
-            display_name="MV37 User",
-        )
-
-    assert exc_info.value.status_code == 409
-    assert service.repository.get_browser_user_by_external_identity(  # type: ignore[attr-defined]
+    session, raw_token = service.upsert_mv37_browser_user(
         issuer="https://auth.mv37.org/realms/mv37",
         subject="mv37-user-1",
-    ) is None
+        email="conflict@example.com",
+        display_name="MV37 User",
+    )
+
+    assert session.authenticated is True
+    assert session.user is not None
+    assert session.user.user_id == existing.user.user_id
+    assert session.user.display_name == "Existing"
+    assert raw_token
+    linked = service.repository.get_browser_user_by_external_identity(  # type: ignore[attr-defined]
+        issuer="https://auth.mv37.org/realms/mv37",
+        subject="mv37-user-1",
+    )
+    assert linked is not None
+    assert linked.user_id == existing.user.user_id
 
 
 def test_browser_settings_round_trip(browser_service):
