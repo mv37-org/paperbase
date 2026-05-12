@@ -500,10 +500,16 @@ export function loadSession() {
   return api<BrowserSessionResponse>("/v1/browser/session", { method: "GET" });
 }
 
+export type LogoutBrowserSessionResponse = {
+  status: string;
+  logout_url?: string;
+};
+
 export function logoutBrowserSession() {
-  return api<{ status: string }>("/v1/browser/auth/logout", { method: "POST" }).finally(
-    clearBrowserSessionToken,
-  );
+  const returnTo = encodeURIComponent(window.location.origin);
+  return api<LogoutBrowserSessionResponse>(`/v1/browser/auth/logout?return_to=${returnTo}`, {
+    method: "POST",
+  }).finally(clearBrowserSessionToken);
 }
 
 export function loadUploads() {

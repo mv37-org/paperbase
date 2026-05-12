@@ -118,6 +118,30 @@ describe("chat api", () => {
     expect(loginUrl.searchParams.get("return_to")).toBe(window.location.origin);
   });
 
+  it("sends the current origin when logging out through MV37", async () => {
+    const fetchMock = vi
+      .fn<[RequestInfo | URL, RequestInit | undefined], Promise<Response>>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          status: "ok",
+          logout_url: "https://auth.mv37.org/realms/mv37/protocol/openid-connect/logout",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadApiModule();
+
+    const result = await api.logoutBrowserSession();
+
+    const [input, init] = fetchMock.mock.calls[0] as FetchCall;
+    const logoutUrl = new URL(String(input), window.location.origin);
+    expect(logoutUrl.pathname).toBe("/v1/browser/auth/logout");
+    expect(logoutUrl.searchParams.get("return_to")).toBe(window.location.origin);
+    expect(init?.method).toBe("POST");
+    expect(result.logout_url).toBe(
+      "https://auth.mv37.org/realms/mv37/protocol/openid-connect/logout",
+    );
+  });
+
   it("dispatches auth-expired on 401 and clears the cached CSRF token", async () => {
     const authExpired = vi.fn();
     window.addEventListener("paperbase:auth-expired", authExpired);

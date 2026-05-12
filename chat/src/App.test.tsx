@@ -911,6 +911,7 @@ describe("App", () => {
       value: vi.fn(),
     });
     apiMocks.getBootstrapSession.mockReturnValue(null);
+    apiMocks.logoutBrowserSession.mockResolvedValue({ status: "ok" });
     apiMocks.loadUploads.mockResolvedValue({ documents: [], available_tags: [] });
     apiMocks.loadProjects.mockResolvedValue({
       projects: [projectSummary("proj_1", "General")],

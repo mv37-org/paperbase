@@ -6379,8 +6379,11 @@ export default function App() {
   }, []);
 
   const handleLogout = useCallback(async () => {
-    await logoutBrowserSession();
+    const result = await logoutBrowserSession();
     resetAuthenticatedState();
+    if (result.logout_url) {
+      window.location.href = result.logout_url;
+    }
   }, [resetAuthenticatedState]);
 
   useEffect(() => {

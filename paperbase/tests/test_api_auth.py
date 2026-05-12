@@ -729,6 +729,9 @@ class StubApiService:
             csrf_token=None,
         )
 
+    def logout_browser_session(self, raw_token: str | None) -> None:
+        self.calls.append(("logout_browser_session", raw_token))
+
     def delete_user_anthropic_key(self, user: BrowserUser) -> BrowserSessionResponse:
         self.calls.append(("delete_user_anthropic_key", user.user_id))
         return BrowserSessionResponse(
@@ -1446,6 +1449,30 @@ def test_browser_cookie_helpers_set_and_clear_expected_headers():
     assert any('paperbase_session=""' in value for value in set_cookie_headers)
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Pragma"] == "no-cache"
+
+
+def test_browser_logout_clears_local_session_and_returns_mv37_logout_url(api_client):
+    client, service, settings = api_client
+    client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
+    csrf = csrf_token_for_session("browser-session-token", settings)
+
+    response = client.post(
+        "/v1/browser/auth/logout",
+        params={"return_to": "https://chat.example/app"},
+        headers={"Origin": settings.browser_origin, "X-Paperbase-CSRF": csrf},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "logout_url": (
+            "https://auth.mv37.org/realms/mv37/protocol/openid-connect/logout"
+            "?client_id=paperbase-test&post_logout_redirect_uri=https%3A%2F%2Fchat.example%2Fapp"
+        ),
+    }
+    assert ("logout_browser_session", "browser-session-token") in service.calls
+    assert any('paperbase_session=""' in value for value in response.headers.get_list("set-cookie"))
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_bearer_routes_require_valid_authentication(api_client):

@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from authlib.integrations.starlette_client import OAuth
 from fastapi.encoders import jsonable_encoder
@@ -241,6 +241,16 @@ def _chat_redirect_base(request: Request, settings, *, return_to: str | None = N
         parts = urlsplit(referer)
         return f"{parts.scheme}://{parts.netloc}"
     return settings.chat_public_url.rstrip("/")
+
+
+def _mv37_logout_url(request: Request, settings, *, return_to: str | None = None) -> str | None:
+    issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
+    client_id = (settings.mv37_client_id or "").strip()
+    if not issuer or not client_id:
+        return None
+    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
+    query = urlencode({"client_id": client_id, "post_logout_redirect_uri": redirect_base})
+    return f"{issuer}/protocol/openid-connect/logout?{query}"
 
 
 def _sse_event(event_name: str, payload: object) -> str:
@@ -1319,13 +1329,19 @@ def browser_session(
 def browser_logout(
     request: Request,
     response: Response,
+    return_to: str | None = Query(default=None),
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> dict[str, str]:
+    logout_url = _mv37_logout_url(request, get_settings(), return_to=return_to)
     service.logout_browser_session(_browser_session_token(request))
+    request.session.clear()
     clear_browser_session_cookie(response, get_settings())
     set_no_store_headers(response)
-    return {"status": "ok"}
+    payload = {"status": "ok"}
+    if logout_url:
+        payload["logout_url"] = logout_url
+    return payload
 
 
 @app.get("/v1/browser/auth/mv37/start")
