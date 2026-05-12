@@ -243,13 +243,19 @@ def _chat_redirect_base(request: Request, settings, *, return_to: str | None = N
     return settings.chat_public_url.rstrip("/")
 
 
-def _mv37_logout_url(request: Request, settings) -> str | None:
+def _mv37_logout_url(request: Request, settings, *, id_token_hint: str | None = None) -> str | None:
     issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
     client_id = (settings.mv37_client_id or "").strip()
-    if not issuer or not client_id:
+    if not issuer or not client_id or not id_token_hint:
         return None
     post_logout_redirect_uri = settings.mv37_oauth_redirect_url or str(request.url_for("browser_mv37_callback"))
-    query = urlencode({"client_id": client_id, "post_logout_redirect_uri": post_logout_redirect_uri})
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "post_logout_redirect_uri": post_logout_redirect_uri,
+            "id_token_hint": id_token_hint,
+        }
+    )
     return f"{issuer}/protocol/openid-connect/logout?{query}"
 
 
@@ -1335,11 +1341,16 @@ def browser_logout(
 ) -> dict[str, str]:
     settings = get_settings()
     redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
-    logout_url = _mv37_logout_url(request, settings)
+    id_token_hint = request.session.get("browser_mv37_id_token_hint")
+    if not isinstance(id_token_hint, str) or not id_token_hint:
+        id_token_hint = None
+    logout_url = _mv37_logout_url(request, settings, id_token_hint=id_token_hint)
     service.logout_browser_session(_browser_session_token(request))
     request.session.clear()
     if logout_url:
         request.session["browser_mv37_logout_return_to"] = redirect_base
+    else:
+        request.session["browser_mv37_prompt_login_once"] = True
     clear_browser_session_cookie(response, settings)
     set_no_store_headers(response)
     payload = {"status": "ok"}
@@ -1360,11 +1371,14 @@ async def browser_mv37_start(request: Request, return_to: str | None = Query(def
     redirect_uri = settings.mv37_oauth_redirect_url or str(request.url_for("browser_mv37_callback"))
     nonce = secrets.token_urlsafe(32)
     request.session["browser_mv37_nonce"] = nonce
+    prompt_login = request.session.pop("browser_mv37_prompt_login_once", None) is True
+    authorize_kwargs = {"code_challenge_method": "S256", "nonce": nonce}
+    if prompt_login:
+        authorize_kwargs["prompt"] = "login"
     return await client.authorize_redirect(
         request,
         redirect_uri,
-        code_challenge_method="S256",
-        nonce=nonce,
+        **authorize_kwargs,
     )
 
 
@@ -1386,6 +1400,9 @@ async def browser_mv37_callback(
         if not isinstance(nonce, str):
             raise RuntimeError("MV37 callback was missing nonce state")
         token = await client.authorize_access_token(request)
+        id_token_hint = token.get("id_token") if isinstance(token, dict) else None
+        if isinstance(id_token_hint, str) and id_token_hint:
+            request.session["browser_mv37_id_token_hint"] = id_token_hint
         claims = await client.parse_id_token(token, nonce=nonce)
         if not isinstance(claims, dict):
             raise RuntimeError("MV37 did not return ID token claims")

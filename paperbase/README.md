@@ -20,7 +20,7 @@ For harvests, `--limit-per-window` is a per category-window cap, not a whole-cat
 The browser backend now persists first-class projects in addition to chat sessions:
 
 - browser login is MV37 OpenID Connect only, mapped by issuer + subject in `external_identities`; MV37 owns email verification policy, and legacy Paperbase email/password accounts migrate to MV37 on first successful same-email login
-- browser logout clears the local Paperbase session and then sends the browser through the MV37 end-session endpoint so a later login shows MV37 again instead of silently reusing SSO
+- browser logout clears the local Paperbase session and uses MV37 RP-initiated logout with an ID token hint when available; older sessions without that hint force the next MV37 login prompt instead of showing Keycloak's logout confirmation page
 - each browser user gets a default `General` project during initialization
 - user-created projects are local-first; optional GitHub sync can create a private repo on `main` or validate an existing repo and selected branch
 - sessions belong to a project, and project session lists are paginated for the sidebar

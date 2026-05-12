@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 from fastapi.responses import RedirectResponse
@@ -715,13 +715,13 @@ class StubApiService:
 
     def get_current_browser_user(self, raw_token: str | None):
         self.calls.append(("get_current_browser_user", raw_token))
-        if raw_token == "browser-session-token":
+        if raw_token in {"browser-session-token", "mv37-browser-token"}:
             return self.browser_user
         return None
 
     def get_browser_session(self, raw_token: str | None) -> BrowserSessionResponse:
         self.calls.append(("get_browser_session", raw_token))
-        user = self.browser_user if raw_token == "browser-session-token" else None
+        user = self.browser_user if raw_token in {"browser-session-token", "mv37-browser-token"} else None
         return BrowserSessionResponse(
             authenticated=user is not None,
             user=user,
@@ -1451,7 +1451,7 @@ def test_browser_cookie_helpers_set_and_clear_expected_headers():
     assert response.headers["Pragma"] == "no-cache"
 
 
-def test_browser_logout_clears_local_session_and_returns_mv37_logout_url(api_client):
+def test_browser_logout_without_mv37_id_token_forces_next_login_prompt(api_client, monkeypatch):
     client, service, settings = api_client
     client.cookies.set(settings.browser_session_cookie_name, "browser-session-token")
     csrf = csrf_token_for_session("browser-session-token", settings)
@@ -1463,21 +1463,21 @@ def test_browser_logout_clears_local_session_and_returns_mv37_logout_url(api_cli
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "logout_url": (
-            "https://auth.mv37.org/realms/mv37/protocol/openid-connect/logout"
-            "?client_id=paperbase-test"
-            "&post_logout_redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Fv1%2Fbrowser%2Fauth%2Fmv37%2Fcallback"
-        ),
-    }
+    assert response.json() == {"status": "ok"}
     assert ("logout_browser_session", "browser-session-token") in service.calls
     assert any('paperbase_session=""' in value for value in response.headers.get_list("set-cookie"))
     assert response.headers["Cache-Control"] == "no-store"
 
-    callback = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
-    assert callback.status_code == 302
-    assert callback.headers["location"] == "https://chat.example/app"
+    fake_client = FakeMv37Client()
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
+    start = client.get(
+        "/v1/browser/auth/mv37/start",
+        params={"return_to": "https://chat.example/app"},
+        follow_redirects=False,
+    )
+
+    assert start.status_code == 302
+    assert fake_client.prompt == "login"
 
 
 def test_bearer_routes_require_valid_authentication(api_client):
@@ -2101,12 +2101,14 @@ class FakeMv37Client:
             self.claims.update(claims)
         self.token_requested = False
         self.nonce = ""
+        self.prompt = None
 
     async def authorize_redirect(self, request, redirect_uri, **kwargs):
         del request
         assert "code_challenge" not in kwargs
         assert kwargs["code_challenge_method"] == "S256"
         assert kwargs["nonce"]
+        self.prompt = kwargs.get("prompt")
         return RedirectResponse(
             "https://auth.mv37.org/realms/mv37/protocol/openid-connect/auth"
             f"?redirect_uri={quote(redirect_uri, safe='')}"
@@ -2161,7 +2163,7 @@ def test_mv37_start_redirects_back_to_return_to_when_not_configured(api_client, 
 
 
 def test_mv37_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):
-    client, service, _ = api_client
+    client, service, settings = api_client
     fake_client = FakeMv37Client()
     monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
 
@@ -2187,6 +2189,29 @@ def test_mv37_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_
             "MV37 User",
         ),
     ) in service.calls
+
+    logout = client.post(
+        "/v1/browser/auth/logout",
+        params={"return_to": "https://chat.example/app"},
+        headers={
+            "Origin": settings.browser_origin,
+            "X-Paperbase-CSRF": csrf_token_for_session("mv37-browser-token", settings),
+        },
+    )
+    assert logout.status_code == 200
+    logout_url = logout.json()["logout_url"]
+    logout_parts = urlsplit(logout_url)
+    logout_query = parse_qs(logout_parts.query)
+    assert logout_parts.path == "/realms/mv37/protocol/openid-connect/logout"
+    assert logout_query["client_id"] == ["paperbase-test"]
+    assert logout_query["id_token_hint"] == ["mv37-id-token"]
+    assert logout_query["post_logout_redirect_uri"] == [
+        "http://127.0.0.1:8080/v1/browser/auth/mv37/callback"
+    ]
+
+    logout_callback = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
+    assert logout_callback.status_code == 302
+    assert logout_callback.headers["location"] == "https://chat.example/app"
 
 
 def test_mv37_callback_allows_unverified_email_claim(api_client, monkeypatch):
