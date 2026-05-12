@@ -243,13 +243,13 @@ def _chat_redirect_base(request: Request, settings, *, return_to: str | None = N
     return settings.chat_public_url.rstrip("/")
 
 
-def _mv37_logout_url(request: Request, settings, *, return_to: str | None = None) -> str | None:
+def _mv37_logout_url(request: Request, settings) -> str | None:
     issuer = (settings.mv37_issuer_url or "").strip().rstrip("/")
     client_id = (settings.mv37_client_id or "").strip()
     if not issuer or not client_id:
         return None
-    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
-    query = urlencode({"client_id": client_id, "post_logout_redirect_uri": redirect_base})
+    post_logout_redirect_uri = settings.mv37_oauth_redirect_url or str(request.url_for("browser_mv37_callback"))
+    query = urlencode({"client_id": client_id, "post_logout_redirect_uri": post_logout_redirect_uri})
     return f"{issuer}/protocol/openid-connect/logout?{query}"
 
 
@@ -1333,10 +1333,14 @@ def browser_logout(
     user=Depends(require_browser_write_user),
     service: PaperbaseService = Depends(get_service),
 ) -> dict[str, str]:
-    logout_url = _mv37_logout_url(request, get_settings(), return_to=return_to)
+    settings = get_settings()
+    redirect_base = _chat_redirect_base(request, settings, return_to=return_to)
+    logout_url = _mv37_logout_url(request, settings)
     service.logout_browser_session(_browser_session_token(request))
     request.session.clear()
-    clear_browser_session_cookie(response, get_settings())
+    if logout_url:
+        request.session["browser_mv37_logout_return_to"] = redirect_base
+    clear_browser_session_cookie(response, settings)
     set_no_store_headers(response)
     payload = {"status": "ok"}
     if logout_url:
@@ -1370,6 +1374,9 @@ async def browser_mv37_callback(
     service: PaperbaseService = Depends(get_service),
 ):
     settings = get_settings()
+    logout_return_to = request.session.pop("browser_mv37_logout_return_to", None)
+    if "code" not in request.query_params and "state" not in request.query_params and _is_safe_return_to(logout_return_to):
+        return RedirectResponse(logout_return_to.rstrip("/"), status_code=302)
     client = get_mv37_oauth_client()
     redirect_base = _chat_redirect_base(request, settings)
     if client is None:

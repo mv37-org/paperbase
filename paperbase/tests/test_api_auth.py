@@ -1467,12 +1467,17 @@ def test_browser_logout_clears_local_session_and_returns_mv37_logout_url(api_cli
         "status": "ok",
         "logout_url": (
             "https://auth.mv37.org/realms/mv37/protocol/openid-connect/logout"
-            "?client_id=paperbase-test&post_logout_redirect_uri=https%3A%2F%2Fchat.example%2Fapp"
+            "?client_id=paperbase-test"
+            "&post_logout_redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Fv1%2Fbrowser%2Fauth%2Fmv37%2Fcallback"
         ),
     }
     assert ("logout_browser_session", "browser-session-token") in service.calls
     assert any('paperbase_session=""' in value for value in response.headers.get_list("set-cookie"))
     assert response.headers["Cache-Control"] == "no-store"
+
+    callback = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "https://chat.example/app"
 
 
 def test_bearer_routes_require_valid_authentication(api_client):
