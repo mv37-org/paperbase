@@ -344,7 +344,11 @@ def get_mv37_oauth_client():
         server_metadata_url=f"{issuer}/.well-known/openid-configuration",
         client_id=settings.mv37_client_id,
         client_secret=settings.mv37_client_secret,
-        client_kwargs={"scope": "openid email profile", "code_challenge_method": "S256"},
+        client_kwargs={
+            "scope": "openid email profile",
+            "code_challenge_method": "S256",
+            "token_endpoint_auth_method": "client_secret_post",
+        },
     )
     return oauth.create_client("mv37")
 

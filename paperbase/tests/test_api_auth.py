@@ -2163,6 +2163,19 @@ def test_mv37_start_redirects_back_to_return_to_when_not_configured(api_client, 
     assert response.headers["location"] == "https://chat.example/app/?auth_error=mv37_not_configured"
 
 
+def test_mv37_oauth_client_uses_client_secret_post(api_client):
+    _, _, _ = api_client
+    api_module.get_mv37_oauth_client.cache_clear()
+
+    client = api_module.get_mv37_oauth_client()
+
+    try:
+        assert client is not None
+        assert client.client_kwargs["token_endpoint_auth_method"] == "client_secret_post"
+    finally:
+        api_module.get_mv37_oauth_client.cache_clear()
+
+
 def test_mv37_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_client, monkeypatch):
     client, service, settings = api_client
     fake_client = FakeMv37Client()
