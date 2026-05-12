@@ -6269,6 +6269,7 @@ describe("App", () => {
 
     expect(apiMocks.startMv37Login).toHaveBeenCalledTimes(1);
     expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
+    expect(document.body.textContent).not.toContain("Continue with MV37");
     expect(document.querySelector("#login-form")).toBeNull();
     expect(document.querySelector("#signup-form")).toBeNull();
     expect(document.querySelector("#reset-form")).toBeNull();
@@ -6326,6 +6327,26 @@ describe("App", () => {
         .querySelector("#settings-modal-form input[name='token_secret']")
         ?.getAttribute("autocomplete"),
     ).toBe("new-password");
+  });
+
+  it("keeps the login modal closed after MV37 callback errors", async () => {
+    window.history.replaceState({}, "", "/?auth_error=mv37_callback_failed");
+    apiMocks.loadSession.mockResolvedValueOnce({
+      authenticated: false,
+      user: null,
+      has_anthropic_api_key: false,
+      csrf_token: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(apiMocks.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    expect(document.querySelector("#auth-modal")?.classList.contains("hidden")).toBe(true);
+    expect(document.body.textContent).not.toContain("Continue with MV37");
+    expect(window.location.search).toBe("");
   });
 
   it("redirects unauthenticated landing prompts to MV37 auth", async () => {

@@ -67,7 +67,6 @@ import {
   EmptyStateActionIcon,
   MaskedAssetIcon,
   ModalFlash,
-  MV37Button,
   SettingsSectionHeading,
 } from "./app/AppChrome";
 import { ChatSessionModals } from "./app/ChatSessionModals";
@@ -243,14 +242,6 @@ const PROJECT_SIDEBAR_ITEM_KINDS: ProjectItemKind[] = ["python_file", "thread"];
 const PAPER_EXPLORATIONS_KEY = "paperbase-paper-explorations";
 const PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH = 310;
 const PAPER_EXPLORATION_SIDEBAR_MAX_WIDTH = PAPER_EXPLORATION_SIDEBAR_MIN_WIDTH * 2;
-const AUTH_VIEW_COPY: Record<AuthView, { title: string; caption: string }> = {
-  login: { title: "Log in", caption: "Use your MV37 account to continue." },
-  settings: {
-    title: "Settings",
-    caption: "Manage inference, audio, sandbox, repos, and appearance.",
-  },
-};
-
 const DEFAULT_BROWSER_SETTINGS: NonNullable<BrowserSessionResponse["settings"]> = {
   openai_api_key_hint: "",
   anthropic_api_key_hint: "",
@@ -1056,7 +1047,7 @@ export default function App() {
   const [feedbackNote, setFeedbackNote] = useState("");
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [syncConflictState, setSyncConflictState] = useState<SyncConflictState>(null);
-  const [authView, setAuthView] = useState<AuthView>("login");
+  const [authView, setAuthView] = useState<AuthView>("settings");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authReady, setAuthReady] = useState(Boolean(bootstrapSession));
   const [publicPresentationToken] = useState(() => presentationTokenFromUrl());
@@ -1469,7 +1460,6 @@ export default function App() {
     };
   }, [emptyStateProjectPickerOpen]);
 
-  const authCopy = AUTH_VIEW_COPY[authView];
   const authenticated = Boolean(session?.authenticated);
   const localThreadDebugEnabled = useMemo(() => isLocalDebugHost(), []);
   const activeThreadId = activeTab?.kind === "thread" ? activeTab.id : null;
@@ -2152,12 +2142,6 @@ export default function App() {
     dismissedChatSetupSignature !== missingChatSetupSignature;
   const appliedAppearanceTheme = sessionSettings.appearance_theme === "dark" ? "dark" : "light";
   const authenticatedDarkThemeEnabled = authenticated && appliedAppearanceTheme === "dark";
-  const activeSettingsConfig = useMemo(
-    () => settingsTabs.find((tab) => tab.id === activeSettingsTab) ?? settingsTabs[0],
-    [activeSettingsTab, settingsTabs],
-  );
-  const authCaption = authView === "settings" ? activeSettingsConfig.caption : authCopy.caption;
-
   useEffect(() => {
     if (!settingsTabs.some((tab) => tab.id === activeSettingsTab)) {
       setActiveSettingsTab("inference");
@@ -4522,18 +4506,12 @@ export default function App() {
         showNoteFlash("Signed in with MV37.");
       } else if (authError === "mv37_not_configured") {
         showErrorFlash("MV37 login is not configured yet.");
-        setAuthView("login");
-        setAuthModalOpen(true);
       } else if (authError === "mv37_email_conflict") {
         showErrorFlash(
           "That email is tied to a legacy Paperbase account. Contact support to migrate it to MV37.",
         );
-        setAuthView("login");
-        setAuthModalOpen(true);
       } else if (authError === "mv37_callback_failed") {
         showErrorFlash("MV37 login failed. Try again.");
-        setAuthView("login");
-        setAuthModalOpen(true);
       } else if (authError === "github_not_configured") {
         showErrorFlash("GitHub OAuth is not configured yet.");
         setActiveSettingsTab("version-control");
@@ -4551,8 +4529,6 @@ export default function App() {
         setAuthModalOpen(true);
       } else if (authError) {
         showErrorFlash("Login failed. Try again.");
-        setAuthView("login");
-        setAuthModalOpen(true);
       } else if (settingsSection) {
         setActiveSettingsTab(settingsSection);
         setAuthView("settings");
@@ -4613,20 +4589,14 @@ export default function App() {
 
   const openAuthModal = useCallback(
     (view: AuthView, settingsTab: SettingsTab = "inference") => {
-      if (view === "login") {
-        redirectToMv37Login();
-        return;
-      }
       clearFlash();
-      if (view === "settings") {
-        setActiveSettingsTab(settingsTab);
-      }
+      setActiveSettingsTab(settingsTab);
       setAuthView(view);
       setAuthModalOpen(true);
       setAccountMenuOpen(false);
       setProjectMenuProjectId(null);
     },
-    [clearFlash, redirectToMv37Login],
+    [clearFlash],
   );
 
   const openChatSetupSettings = useCallback(
@@ -4654,7 +4624,7 @@ export default function App() {
     const mentions = landingTags.filter((tag) => tag.id);
     if (!sessionRef.current?.authenticated) {
       rememberPendingPrompt(prompt, mentions);
-      openAuthModal("login");
+      redirectToMv37Login();
       return;
     }
     if (!requireInferenceAccess()) {
@@ -4669,7 +4639,7 @@ export default function App() {
     createNewThread,
     landingPrompt,
     landingTags,
-    openAuthModal,
+    redirectToMv37Login,
     requireInferenceAccess,
     sendMessage,
   ]);
@@ -4679,12 +4649,12 @@ export default function App() {
       const target = paperActionTargetFromTrendingDetail(detail);
       if (!sessionRef.current?.authenticated) {
         rememberPendingPaperExploration(target);
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       void startPaperExploration(target);
     },
-    [openAuthModal, startPaperExploration],
+    [redirectToMv37Login, startPaperExploration],
   );
 
   const handlePaperDiscussionVote = useCallback(async () => {
@@ -4692,7 +4662,7 @@ export default function App() {
       return;
     }
     if (!sessionRef.current?.authenticated) {
-      openAuthModal("login");
+      redirectToMv37Login();
       return;
     }
     const paperId = activePaperExploration.paperId;
@@ -4724,7 +4694,7 @@ export default function App() {
   }, [
     activePaperDiscussion.viewerHasUpvoted,
     activePaperExploration,
-    openAuthModal,
+    redirectToMv37Login,
     showErrorFlash,
   ]);
 
@@ -4767,7 +4737,7 @@ export default function App() {
         return;
       }
       if (!sessionRef.current?.authenticated) {
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       const paperId = activePaperExploration.paperId;
@@ -4782,7 +4752,7 @@ export default function App() {
         };
       });
     },
-    [activePaperExploration, openAuthModal],
+    [activePaperExploration, redirectToMv37Login],
   );
 
   const handlePaperDiscussionReplyCancel = useCallback(
@@ -4841,7 +4811,7 @@ export default function App() {
         return;
       }
       if (!sessionRef.current?.authenticated) {
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       const paperId = activePaperExploration.paperId;
@@ -4879,7 +4849,7 @@ export default function App() {
         }));
       }
     },
-    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+    [activePaperExploration, paperDiscussionStates, redirectToMv37Login, showErrorFlash],
   );
 
   const handlePaperDiscussionReplySubmit = useCallback(
@@ -4889,7 +4859,7 @@ export default function App() {
         return;
       }
       if (!sessionRef.current?.authenticated) {
-        openAuthModal("login");
+        redirectToMv37Login();
         return;
       }
       const paperId = activePaperExploration.paperId;
@@ -4938,7 +4908,7 @@ export default function App() {
         }));
       }
     },
-    [activePaperExploration, openAuthModal, paperDiscussionStates, showErrorFlash],
+    [activePaperExploration, paperDiscussionStates, redirectToMv37Login, showErrorFlash],
   );
 
   const handleUpload = useCallback(
@@ -6669,7 +6639,7 @@ export default function App() {
                 browseState={trendingBrowseState}
                 onChangeBrowseState={updateTrendingBrowseState}
                 onReadPaper={handleReadTrendingPaper}
-                onRequireAuth={() => openAuthModal("login")}
+                onRequireAuth={redirectToMv37Login}
               />
             </div>
           </main>
@@ -6679,7 +6649,7 @@ export default function App() {
               id="landing-login-button"
               className="landing-login-button"
               type="button"
-              onClick={() => openAuthModal("login")}
+              onClick={redirectToMv37Login}
             >
               <span className="landing-login-icon" aria-hidden="true">
                 <AppIcon src={staticAssetPath("login.svg")} className="landing-login-icon-image" />
@@ -6710,7 +6680,7 @@ export default function App() {
                 </div>
                 <LandingMentionEditor
                   attachButtonId="landing-upload-trigger"
-                  onAttach={() => openAuthModal("login")}
+                  onAttach={redirectToMv37Login}
                   onChange={setLandingPrompt}
                   onSubmit={() => void handleLandingSubmit()}
                   onTagsChange={setLandingTags}
@@ -6729,7 +6699,7 @@ export default function App() {
                   onChangeBrowseState={setLandingTrendingBrowseState}
                   onOpenPaper={updateTrendingBrowseState}
                   onReadPaper={handleReadTrendingPaper}
-                  onRequireAuth={() => openAuthModal("login")}
+                  onRequireAuth={redirectToMv37Login}
                   feedTitle="Trending papers"
                   feedDescription=""
                   pageSize={LANDING_TRENDING_PAGE_SIZE}
@@ -7514,7 +7484,7 @@ export default function App() {
                       }
                       onChangeBrowseState={(nextState) => updateTrendingBrowseState(nextState)}
                       onReadPaper={handleReadTrendingPaper}
-                      onRequireAuth={() => openAuthModal("login")}
+                      onRequireAuth={redirectToMv37Login}
                     />
                   </div>
                 ) : sessionSummary?.isAdmin ? (
@@ -10567,7 +10537,7 @@ export default function App() {
         aria-modal="true"
       >
         <div className="modal-backdrop" data-close-modal="true" onClick={closeAuthModal} />
-        <div className={`modal-panel${authView === "settings" ? " settings-modal-panel" : ""}`}>
+        <div className="modal-panel settings-modal-panel">
           <button
             className="modal-close"
             type="button"
@@ -10576,29 +10546,6 @@ export default function App() {
           >
             ×
           </button>
-          {authView === "settings" ? null : (
-            <div className="modal-heading">
-              <div className="modal-heading-copy">
-                <h2 id="auth-modal-title" className="modal-title">
-                  {authCopy.title}
-                </h2>
-                <p id="auth-modal-caption" className="modal-caption">
-                  {authCaption}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {flash && authView !== "settings" ? (
-            <ModalFlash message={flash} kind={flashKind} />
-          ) : null}
-
-          <div
-            className={`modal-view${authView === "login" ? " visible" : ""}`}
-            data-auth-view="login"
-          >
-            <MV37Button />
-          </div>
 
           <div
             className={`modal-view${authView === "settings" ? " visible" : ""}`}

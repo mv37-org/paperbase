@@ -1,4 +1,4 @@
-export type AuthView = "login" | "settings";
+export type AuthView = "settings";
 
 export interface BrowserUser {
   user_id: string;

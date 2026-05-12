@@ -1,6 +1,5 @@
 import type { CSSProperties } from "react";
 
-import { startMv37Login } from "../api";
 import type { ModalFlashKind } from "./appTypes";
 import { staticAssetPath } from "./appUtils";
 
@@ -39,22 +38,6 @@ export function ModalFlash({
       ) : null}
       <span className="modal-flash-text">{message}</span>
     </div>
-  );
-}
-
-export function MV37Button() {
-  return (
-    <button
-      className="oauth-button mv37-oauth-button"
-      data-mv37-login="true"
-      type="button"
-      onClick={startMv37Login}
-    >
-      <span className="mv37-oauth-mark" aria-hidden="true">
-        MV
-      </span>
-      <span>Continue with MV37</span>
-    </button>
   );
 }
 
