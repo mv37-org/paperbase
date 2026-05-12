@@ -2161,6 +2161,27 @@ def test_mv37_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_
     ) in service.calls
 
 
+def test_mv37_callback_allows_unverified_email_claim(api_client, monkeypatch):
+    client, service, _ = api_client
+    fake_client = FakeMv37Client({"email_verified": False})
+    monkeypatch.setattr(api_module, "get_mv37_oauth_client", lambda: fake_client)
+
+    client.get("/v1/browser/auth/mv37/start", follow_redirects=False)
+    callback = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
+
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "https://paperbase.example/?auth=mv37"
+    assert (
+        "upsert_mv37_browser_user",
+        (
+            "https://auth.mv37.org/realms/mv37",
+            "mv37-user-1",
+            "mv37@example.com",
+            "MV37 User",
+        ),
+    ) in service.calls
+
+
 def test_mv37_callback_email_conflict_does_not_auto_link(api_client, monkeypatch):
     client, service, _ = api_client
     fake_client = FakeMv37Client({"email": "conflict@example.com"})
@@ -2188,7 +2209,6 @@ def test_mv37_callback_email_conflict_does_not_auto_link(api_client, monkeypatch
         {"iss": "https://evil.example/realms/mv37"},
         {"aud": "other-client"},
         {"exp": 1},
-        {"email_verified": False},
         {"sub": ""},
     ],
 )

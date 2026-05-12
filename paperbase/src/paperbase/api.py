@@ -382,9 +382,6 @@ def _validate_mv37_claims(claims: dict[str, object], settings) -> tuple[str, str
     if not isinstance(expires_at, (int, float)) or expires_at <= time.time():
         raise RuntimeError("MV37 response was expired")
 
-    if claims.get("email_verified") is not True:
-        raise RuntimeError("MV37 account email is not verified")
-
     subject = str(claims.get("sub") or "").strip()
     email = str(claims.get("email") or "").strip()
     display_name = str(claims.get("name") or claims.get("preferred_username") or "").strip()
