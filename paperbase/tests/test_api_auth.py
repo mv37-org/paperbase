@@ -1295,6 +1295,7 @@ def api_client(monkeypatch):
         mv37_issuer_url="https://auth.mv37.org/realms/mv37",
         mv37_client_id="paperbase-test",
         mv37_client_secret="paperbase-secret",
+        mv37_oauth_redirect_url="https://paperbase.example/v1/browser/auth/mv37/callback",
     )
     service = StubApiService()
 
@@ -2205,9 +2206,7 @@ def test_mv37_callback_success_sets_cookie_and_redirects_to_saved_return_to(api_
     assert logout_parts.path == "/realms/mv37/protocol/openid-connect/logout"
     assert logout_query["client_id"] == ["paperbase-test"]
     assert logout_query["id_token_hint"] == ["mv37-id-token"]
-    assert logout_query["post_logout_redirect_uri"] == [
-        "http://127.0.0.1:8080/v1/browser/auth/mv37/callback"
-    ]
+    assert logout_query["post_logout_redirect_uri"] == [settings.mv37_oauth_redirect_url]
 
     logout_callback = client.get("/v1/browser/auth/mv37/callback", follow_redirects=False)
     assert logout_callback.status_code == 302
