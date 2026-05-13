@@ -173,6 +173,12 @@ describe("AdminOpsPanel", () => {
   });
 
   it("shows grouped child jobs when a root job expands", async () => {
+    // Pin Date.now so the "Last 7 days" window includes the test's
+    // 2026-05-06T08:01 jobs regardless of when the suite runs. Without
+    // this, the same test passes early on 2026-05-13 (job ~7 days old)
+    // and fails later the same day once the rolling window steps past
+    // the data — surfaced on the post-merge CI run for PR #75.
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-05-06T12:00:00Z").getTime());
     apiMocks.loadBrowserAdminJobsOverview.mockResolvedValue({
       jobs: [
         adminJob({
