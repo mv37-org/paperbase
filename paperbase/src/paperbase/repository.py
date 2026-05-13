@@ -2425,6 +2425,12 @@ class SqlAlchemyPaperRepository(PaperRepository):
         search_document: str = "",
         embedding: list[float] | None = None,
     ) -> PaperResponse:
+        # PaperMetadata strips NULs via its model_validator; search_document
+        # arrives independently (callers pass paper.abstract or extractor
+        # output) so it needs its own sanitization to keep the papers INSERT
+        # path safe from `(psycopg.DataError) cannot contain NUL bytes`.
+        if "\x00" in search_document:
+            search_document = search_document.replace("\x00", "")
         canon_arxiv = canonical_arxiv_id(paper.arxiv_id)
         statement = insert(PaperORM).values(
             paper_id=canonical_paper_id(paper.arxiv_id),

@@ -9713,3 +9713,29 @@ def test_backfill_code_urls_dry_run_does_not_write(
     assert paper is not None
     assert paper.code_url == "https://github.com/stale/guess"
     assert paper.code_url_source == "extracted"
+
+
+def test_paper_metadata_strips_nul_bytes_from_string_fields() -> None:
+    """Stray NUL (0x00) bytes in arxiv/S2-fetched fields previously
+    crashed harvest_chunk on the papers INSERT with
+    `(psycopg.DataError) ... cannot contain NUL bytes`. The
+    PaperMetadata model_validator must strip them before they reach
+    the repository."""
+    meta = PaperMetadata(
+        arxiv_id="2401.00001",
+        title="A title\x00with nul",
+        abstract="abstract\x00body",
+        authors="Author One\x00; Author Two",
+        comment=None,
+        journal_ref="Nature \x00 2024",
+        code_url_candidates=["https://a.example/\x00ok", "https://b.example/clean"],
+    )
+    assert "\x00" not in meta.title
+    assert meta.title == "A titlewith nul"
+    assert "\x00" not in meta.abstract
+    assert "\x00" not in meta.authors
+    assert meta.journal_ref is not None and "\x00" not in meta.journal_ref
+    assert meta.code_url_candidates == [
+        "https://a.example/ok",
+        "https://b.example/clean",
+    ]
