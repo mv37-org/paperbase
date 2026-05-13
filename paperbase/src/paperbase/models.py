@@ -53,6 +53,25 @@ class PaperMetadata(BaseModel):
     index_status: str = "discovered"
     indexed_at: datetime | None = None
 
+    @model_validator(mode="after")
+    def _strip_nul_bytes(self) -> "PaperMetadata":
+        # PostgreSQL text columns reject 0x00. arxiv abstracts and S2
+        # metadata occasionally contain stray NULs that surfaced as
+        # (psycopg.DataError) "cannot contain NUL (0x00) bytes" on the
+        # papers INSERT path and killed entire harvest_chunk jobs.
+        for name, value in list(self.__dict__.items()):
+            if isinstance(value, str) and "\x00" in value:
+                object.__setattr__(self, name, value.replace("\x00", ""))
+            elif isinstance(value, list) and any(
+                isinstance(v, str) and "\x00" in v for v in value
+            ):
+                object.__setattr__(
+                    self,
+                    name,
+                    [v.replace("\x00", "") if isinstance(v, str) else v for v in value],
+                )
+        return self
+
 
 class PaperResponse(PaperMetadata):
     paper_id: str
