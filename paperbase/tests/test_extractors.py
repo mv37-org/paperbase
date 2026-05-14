@@ -8,12 +8,14 @@ from PIL import Image
 
 from paperbase.extractors import (
     PREVIEW_ARTIFACT_PATH,
+    TableArtifact,
     _extract_latex_figures,
     _extract_latex_text,
     _extract_sections,
     _latex_to_markdown,
     _load_latex_archive,
     _sanitize_extracted_text,
+    _scan_docling_tables,
     build_manifest,
     extract_github_candidates,
     extract_github_url,
@@ -1097,3 +1099,135 @@ def test_load_latex_archive_skips_oversize_image_assets():
     _, assets = _load_latex_archive(tarball)
 
     assert "figs/huge.png" not in assets
+
+
+# --- _scan_docling_tables --------------------------------------------------- #
+
+
+def _docling_table_item(rows: list[list[str]], *, table_id: str = "tables/0") -> dict:
+    """Build a docling-shaped table item with the canonical `data.grid`."""
+    grid = [
+        [
+            {"text": cell, "row_span": 1, "col_span": 1}
+            for cell in row
+        ]
+        for row in rows
+    ]
+    return {
+        "self_ref": f"#/{table_id}",
+        "label": "table",
+        "captions": [],
+        "data": {
+            "num_rows": len(rows),
+            "num_cols": len(rows[0]) if rows else 0,
+            "grid": grid,
+            "table_cells": [],
+        },
+    }
+
+
+def test_scan_docling_tables_extracts_real_tables_from_canonical_list():
+    """Real tables live under payload['tables'] with label=='table'; the
+    scanner must reshape data.grid into list[list[str]] for TableArtifact."""
+    payload = {
+        "tables": [_docling_table_item([["A", "B"], ["1", "2"]])],
+        "pictures": [],
+        "texts": [],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert len(out) == 1
+    assert out[0].rows == [["A", "B"], ["1", "2"]]
+
+
+def test_scan_docling_tables_ignores_formula_items_referencing_tables():
+    """Regression: equation/formula items often appear in payload['texts']
+    with a label like 'formula' and may carry strings referencing nearby
+    tables ('see Table 3 above', '#/tables/0'). The previous recursive
+    substring-on-'table' scanner mistook those for real tables. The
+    canonical-list scanner must skip them entirely."""
+    payload = {
+        "tables": [],
+        "texts": [
+            {
+                "self_ref": "#/texts/12",
+                "label": "formula",
+                "text": "x = y^2",
+                # Adjacent caption that just happens to mention a table.
+                "captions": ["as shown in Table 3"],
+                # Some shapes inline a 1xN grid for math layouts.
+                "data": {
+                    "grid": [[{"text": "x"}, {"text": "="}, {"text": "y^2"}]],
+                },
+            },
+            {
+                "self_ref": "#/texts/13",
+                "label": "caption",
+                "text": "Table 4: ablation numbers",
+            },
+        ],
+        # Even if a formula self-references a tables/ path, that alone
+        # must not promote it to a table.
+        "groups": [
+            {"self_ref": "#/groups/0", "label": "section", "children": [{"$ref": "#/tables/0"}]},
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert out == []
+
+
+def test_scan_docling_tables_skips_non_table_label_in_tables_list():
+    """Defensive: even if a future docling schema lets non-table items
+    leak into payload['tables'], the label gate must drop them so a
+    'formula' entry can't become a TableArtifact."""
+    payload = {
+        "tables": [
+            {
+                "self_ref": "#/tables/0",
+                "label": "formula",
+                "data": {"grid": [[{"text": "x"}]]},
+            },
+            _docling_table_item([["only", "real"], ["table", "here"]], table_id="tables/1"),
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert len(out) == 1
+    assert out[0].rows == [["only", "real"], ["table", "here"]]
+
+
+def test_scan_docling_tables_pulls_caption_from_string_captions():
+    """Caption can be a plain string on older docling schemas."""
+    item = _docling_table_item([["a", "b"]])
+    item["captions"] = "Table 1: baseline comparison."
+    out: list[TableArtifact] = []
+    _scan_docling_tables({"tables": [item]}, out)
+    assert out[0].caption == "Table 1: baseline comparison."
+
+
+def test_scan_docling_tables_falls_back_to_legacy_rows_shape():
+    """If a docling version puts plain list-of-list-of-strings under
+    'rows' directly on the table item (instead of nested under
+    data.grid), the scanner should still pick it up."""
+    payload = {
+        "tables": [
+            {
+                "self_ref": "#/tables/0",
+                "label": "table",
+                "rows": [["x", "y"], ["1", "2"]],
+            },
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert out[0].rows == [["x", "y"], ["1", "2"]]
+
+
+def test_scan_docling_tables_no_op_on_non_dict_or_missing_tables():
+    """Defensive: malformed/empty payloads return zero tables, not raise."""
+    out: list[TableArtifact] = []
+    _scan_docling_tables(None, out)
+    _scan_docling_tables({"texts": []}, out)
+    _scan_docling_tables({"tables": "not-a-list"}, out)
+    assert out == []
