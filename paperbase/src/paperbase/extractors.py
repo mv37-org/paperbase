@@ -1186,20 +1186,100 @@ def _docling_export_dict(document: object) -> dict:
     return {}
 
 
+def _docling_grid_to_rows(grid: object) -> list[list[str]] | None:
+    """Convert a docling ``data.grid`` (list of rows of cell dicts) into the
+    plain ``list[list[str]]`` shape :class:`TableArtifact` expects. Returns
+    ``None`` if the grid isn't shaped like a real table."""
+    if not isinstance(grid, list) or not grid:
+        return None
+    rows: list[list[str]] = []
+    for raw_row in grid:
+        if not isinstance(raw_row, list):
+            return None
+        row: list[str] = []
+        for cell in raw_row:
+            if isinstance(cell, dict):
+                row.append(str(cell.get("text") or ""))
+            elif cell is None:
+                row.append("")
+            else:
+                row.append(str(cell))
+        rows.append(row)
+    return rows
+
+
+def _docling_table_caption(raw: dict) -> str | None:
+    """Best-effort caption pull from a docling table item. ``captions`` is a
+    list of $ref strings on modern docling; on older shapes it can be a
+    plain string."""
+    captions = raw.get("captions")
+    if isinstance(captions, str) and captions.strip():
+        return captions
+    if isinstance(captions, list):
+        for entry in captions:
+            if isinstance(entry, str) and entry.strip():
+                return entry
+            if isinstance(entry, dict):
+                text = entry.get("text") or entry.get("$ref")
+                if isinstance(text, str) and text.strip():
+                    return text
+    caption = raw.get("caption")
+    if isinstance(caption, str) and caption.strip():
+        return caption
+    return None
+
+
 def _scan_docling_tables(payload: object, tables: list[TableArtifact]) -> None:
-    if isinstance(payload, dict):
-        lower_values = " ".join(str(value) for value in payload.values()).lower()
-        if "table" in lower_values:
-            rows = payload.get("rows") or payload.get("data") or payload.get("cells")
-            if isinstance(rows, list) and rows and all(isinstance(row, list) for row in rows):
-                table_id = payload.get("id") or f"table-{len(tables) + 1}"
-                caption = payload.get("caption")
-                tables.append(TableArtifact(table_id=slugify(str(table_id)), caption=caption, rows=rows))
-        for value in payload.values():
-            _scan_docling_tables(value, tables)
-    elif isinstance(payload, list):
-        for item in payload:
-            _scan_docling_tables(item, tables)
+    """Collect real table items from a docling ``export_to_dict`` payload.
+
+    Docling puts canonical tables in the top-level ``tables`` list with an
+    explicit ``label: "table"`` discriminator. Sibling lists like
+    ``pictures``, ``texts``, and ``groups`` can also describe formulas /
+    captions / cross-references whose values contain the substring
+    "table" (e.g. ``"self_ref": "#/tables/0"``, captions like "as shown
+    in Table 3", or formula items referenced from a table caption). A
+    previous version of this scanner walked every dict recursively and
+    matched on any value containing "table", which classified equations
+    as tables whenever their surrounding metadata mentioned one.
+
+    Read only the canonical ``tables`` list, gate on ``label == "table"``,
+    and reshape ``data.grid`` into the ``list[list[str]]`` that
+    :class:`TableArtifact` expects.
+    """
+    if not isinstance(payload, dict):
+        return
+    canonical = payload.get("tables")
+    if not isinstance(canonical, list):
+        return
+    for raw in canonical:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("label") != "table":
+            continue
+        data = raw.get("data")
+        rows: list[list[str]] | None = None
+        if isinstance(data, dict):
+            rows = _docling_grid_to_rows(data.get("grid"))
+        if rows is None:
+            # Legacy/alternate shapes: some docling versions put a plain
+            # list-of-list-of-strings under "rows" / "cells" directly on
+            # the table item.
+            for key in ("rows", "cells"):
+                candidate = raw.get(key)
+                if (
+                    isinstance(candidate, list)
+                    and candidate
+                    and all(isinstance(row, list) for row in candidate)
+                ):
+                    rows = [[str(cell) for cell in row] for row in candidate]
+                    break
+        if rows is None:
+            continue
+        table_id = raw.get("self_ref") or raw.get("id") or f"table-{len(tables) + 1}"
+        caption = _docling_table_caption(raw)
+        tables.append(
+            TableArtifact(table_id=slugify(str(table_id)), caption=caption, rows=rows)
+        )
 
 
 def extract_with_docling(pdf_bytes: bytes) -> ExtractionOutput | None:
