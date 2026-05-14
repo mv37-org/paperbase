@@ -325,6 +325,7 @@ _JOB_TYPE_MAX_ATTEMPTS: dict[str, int] = {
     "enrich_missing_metadata": 5,
     "reindex_missing_embeddings": 2,
     "reindex_embeddings": 2,
+    "reindex_tables": 2,
     "harvest_range": 3,
     "harvest_chunk": 5,
     "harvest_top_cited": 3,  # planner — paginates S2, enqueues harvest_chunk per batch
@@ -347,6 +348,7 @@ _JOB_TYPE_PRIORITY: dict[str, int] = {
     "enrich_missing_metadata": 0,
     "reindex_missing_embeddings": 0,
     "reindex_embeddings": 0,
+    "reindex_tables": 1,
     "harvest_range": 5,
     "harvest_chunk": 10,
     "harvest_top_cited": 5,  # planner; same priority tier as harvest_range
@@ -1403,6 +1405,29 @@ class PaperRepository(ABC):
 
     @abstractmethod
     def replace_text_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace_table_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
+        """Replace only ``chunk_kind='table'`` chunks for a paper, leaving
+        section / full_text chunks untouched. Used by ``reindex_tables``
+        so a tables-only refresh doesn't blow away the rest of the
+        paper's text-chunk surface."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_papers_for_table_reindex(
+        self,
+        *,
+        limit: int,
+        indexed_before: datetime | None = None,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        """Keyset-paginated frontier for ``reindex_tables`` — indexed
+        papers ordered by ``indexed_at ASC, paper_id ASC`` so oldest-
+        ingested rows (the most likely to carry a stale extractor's
+        output) are refreshed first. ``indexed_before`` lets the caller
+        scope to rows ingested before a known fix-rollout timestamp."""
         raise NotImplementedError
 
     @abstractmethod
@@ -2909,6 +2934,77 @@ class SqlAlchemyPaperRepository(PaperRepository):
                     )
 
         _retry_on_deadlock(_do, label="replace_text_chunks")
+
+    def replace_table_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
+        # Narrow variant of ``replace_text_chunks`` that only swaps the
+        # ``chunk_kind='table'`` rows for a paper. Used by reindex_tables
+        # so a tables-only refresh leaves section / full_text vectors
+        # alone — re-embedding those is expensive and unnecessary when
+        # only the table-classification heuristic changed.
+        def _do() -> None:
+            with self._session() as session:
+                session.execute(
+                    delete(TextChunkORM).where(
+                        TextChunkORM.paper_id == paper_id,
+                        TextChunkORM.chunk_kind == "table",
+                    )
+                )
+                for chunk in chunks:
+                    session.add(
+                        TextChunkORM(
+                            chunk_id=new_id("chunk"),
+                            paper_id=paper_id,
+                            path=chunk["path"],
+                            chunk_kind=chunk["chunk_kind"],
+                            content=chunk["content"],
+                            embedding=chunk.get("embedding"),
+                            chunk_index=int(chunk.get("chunk_index", 0)),
+                            section_depth=int(chunk.get("section_depth", 1)),
+                            section_order=int(chunk.get("section_order", 0)),
+                        )
+                    )
+
+        _retry_on_deadlock(_do, label="replace_table_chunks")
+
+    def list_papers_for_table_reindex(
+        self,
+        *,
+        limit: int,
+        indexed_before: datetime | None = None,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        """Keyset frontier over indexed papers, oldest indexed first, so
+        rows ingested under a buggy extractor are refreshed before more
+        recent ones. ``indexed_before`` lets callers scope to a fix
+        cutover timestamp."""
+        params: dict[str, Any] = {"limit": limit}
+        clauses: list[str] = ["papers.index_status = 'indexed'"]
+        if indexed_before is not None:
+            clauses.append("papers.indexed_at IS NOT NULL AND papers.indexed_at < :indexed_before")
+            params["indexed_before"] = indexed_before
+        if after is not None:
+            # Keyset on (indexed_at NULLS LAST, paper_id ASC). NULL
+            # indexed_at rows are surfaced last; after-pagination through
+            # them uses paper_id as the tiebreaker.
+            clauses.append(
+                "((papers.indexed_at > :after_indexed_at) "
+                "OR (papers.indexed_at = :after_indexed_at AND papers.paper_id > :after_paper_id))"
+            )
+            params["after_indexed_at"] = after.indexed_at
+            params["after_paper_id"] = after.paper_id
+        where_sql = " AND ".join(clauses)
+        sql = text(
+            f"""
+            SELECT papers.*
+            FROM papers
+            WHERE {where_sql}
+            ORDER BY papers.indexed_at ASC NULLS LAST, papers.paper_id ASC
+            LIMIT :limit
+            """
+        )
+        with self._session() as session:
+            rows = session.scalars(select(PaperORM).from_statement(sql).params(**params)).all()
+        return [_paper_from_orm(row) for row in rows]
 
     def update_code_ingest_state(
         self,
@@ -6682,6 +6778,44 @@ class MemoryPaperRepository(PaperRepository):
         for chunk in chunks:
             stamped.append({**chunk, "chunk_id": chunk.get("chunk_id") or new_id("chunk")})
         self.text_chunks[paper_id] = stamped
+
+    def replace_table_chunks(self, paper_id: str, chunks: list[dict[str, Any]]) -> None:
+        # Mirror the Postgres path: swap only chunk_kind='table' rows.
+        existing = self.text_chunks.get(paper_id, [])
+        kept = [c for c in existing if c.get("chunk_kind") != "table"]
+        stamped = [
+            {**chunk, "chunk_id": chunk.get("chunk_id") or new_id("chunk"), "paper_id": paper_id}
+            for chunk in chunks
+        ]
+        self.text_chunks[paper_id] = kept + stamped
+
+    def list_papers_for_table_reindex(
+        self,
+        *,
+        limit: int,
+        indexed_before: datetime | None = None,
+        after: PaperResponse | None = None,
+    ) -> list[PaperResponse]:
+        candidates = [
+            paper
+            for paper in self.papers.values()
+            if paper.index_status == "indexed"
+            and (
+                indexed_before is None
+                or (paper.indexed_at is not None and paper.indexed_at < indexed_before)
+            )
+        ]
+        # NULL indexed_at sorts last so the Postgres ``NULLS LAST`` is mirrored.
+        sentinel = datetime.max.replace(tzinfo=timezone.utc)
+
+        def _sort_key(p: PaperResponse) -> tuple[datetime, str]:
+            return (p.indexed_at or sentinel, p.paper_id)
+
+        candidates.sort(key=_sort_key)
+        if after is not None:
+            after_key = (after.indexed_at or sentinel, after.paper_id)
+            candidates = [p for p in candidates if _sort_key(p) > after_key]
+        return candidates[:limit]
 
     def update_code_ingest_state(
         self,

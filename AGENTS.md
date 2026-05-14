@@ -18,7 +18,7 @@ Use the repo-root `Makefile` as the primary interface:
 
 Do not replace these with ad hoc command sequences in normal work. If you need lower-level helpers, use the installed `paperbase-dev` CLI rather than custom shell scripts.
 
-Operator-facing `paperbase-dev` commands include `benchmark list`, `benchmark run iq-1`, `jobs list-dead`, `jobs retry <job_id>`, `jobs cancel <job_id>`, and `harvest`. For harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range.
+Operator-facing `paperbase-dev` commands include `benchmark list`, `benchmark run iq-1`, `jobs list-dead`, `jobs retry <job_id>`, `jobs cancel <job_id>`, `harvest`, and `reindex-tables`. For harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range. `reindex-tables` queues a tables-only refresh that re-runs docling against stored PDFs and rewrites `tables/index.json` + `chunk_kind='table'` chunks; use `--indexed-before <ISO-8601>` to scope to rows ingested before a known fix cutover.
 
 ## Environment and Local Prerequisites
 

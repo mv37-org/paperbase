@@ -16,7 +16,7 @@ Primary commands:
 - `make benchmark`
 - `make clean`
 
-Lower-level workflow operations should go through `paperbase-dev`, not ad hoc scripts. Operator-facing `paperbase-dev` commands include `benchmark list`, `benchmark run iq-1`, `jobs list-dead`, `jobs retry <job_id>`, `jobs cancel <job_id>`, and `harvest`; for harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range.
+Lower-level workflow operations should go through `paperbase-dev`, not ad hoc scripts. Operator-facing `paperbase-dev` commands include `benchmark list`, `benchmark run iq-1`, `jobs list-dead`, `jobs retry <job_id>`, `jobs cancel <job_id>`, `harvest`, and `reindex-tables`. For harvests, `--limit-per-window` caps each category-window chunk, not the whole category across the requested range. `reindex-tables` queues a tables-only refresh that re-runs the docling extractor against stored PDFs and rewrites `tables/index.json` + `chunk_kind='table'` chunks; use `--indexed-before <ISO-8601>` to scope to rows ingested before a known fix cutover.
 
 ## Required Validation Flow
 
