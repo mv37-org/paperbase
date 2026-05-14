@@ -570,6 +570,37 @@ def reindex_embeddings(*, limit: int, include_chunks: bool, rewrite_existing: bo
     return 0
 
 
+def reindex_tables(*, limit: int, indexed_before: str | None) -> int:
+    """Queue a ``reindex_tables`` job. ``indexed_before`` is an ISO-8601
+    timestamp; rows ingested before that point are refreshed first."""
+    from datetime import datetime
+
+    settings = _settings()
+    service = PaperbaseService(
+        settings=settings,
+        repository=build_repository(settings),
+        object_store=build_object_store(settings),
+    )
+    service.init()
+    parsed_before: datetime | None = None
+    if indexed_before:
+        try:
+            parsed_before = datetime.fromisoformat(indexed_before)
+        except ValueError as exc:
+            print(f"--indexed-before must be ISO-8601 (got {indexed_before!r}): {exc}")
+            return 2
+    job = service.enqueue_reindex_tables_job(
+        limit=limit,
+        indexed_before=parsed_before,
+    )
+    print(f"Queued job:            {job.job_id}")
+    print(f"Job type:              {job.job_type}")
+    print(f"Limit:                 {limit}")
+    if parsed_before is not None:
+        print(f"Indexed before:        {parsed_before.isoformat()}")
+    return 0
+
+
 def jobs_list_dead(*, limit: int) -> int:
     """Print dead-letter jobs (exhausted retries). Intended as a triage
     entry point — operator eyeballs the error text, then either retries or
@@ -1023,6 +1054,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Backfill NULL embeddings only instead of rewriting existing vectors.",
     )
 
+    reindex_tables_parser = subparsers.add_parser(
+        "reindex-tables",
+        help=(
+            "Queue a worker job that re-runs the docling table extractor "
+            "against stored PDFs and rewrites tables/index.json + per-table "
+            "blobs + chunk_kind='table' text chunks. Used to clean rows "
+            "ingested under a buggy extractor without a full re-index."
+        ),
+    )
+    reindex_tables_parser.add_argument("--limit", type=int, default=100_000)
+    reindex_tables_parser.add_argument(
+        "--indexed-before",
+        type=str,
+        default=None,
+        help=(
+            "ISO-8601 timestamp; only rows with indexed_at < this value are "
+            "refreshed. Use the deploy time of the extractor fix you're "
+            "backfilling for, e.g. '2026-05-14T22:42:00+00:00'."
+        ),
+    )
+
     jobs_parser = subparsers.add_parser(
         "jobs",
         help="Inspect and operate on the worker job queue (dead-letter, retry).",
@@ -1300,6 +1352,11 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             include_chunks=not args.skip_chunks,
             rewrite_existing=not args.missing_only,
+        )
+    if args.command == "reindex-tables":
+        return reindex_tables(
+            limit=args.limit,
+            indexed_before=args.indexed_before,
         )
     if args.command == "jobs":
         if args.jobs_command == "list-dead":

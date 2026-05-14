@@ -9739,3 +9739,214 @@ def test_paper_metadata_strips_nul_bytes_from_string_fields() -> None:
         "https://a.example/ok",
         "https://b.example/clean",
     ]
+
+
+# --- reindex_tables --------------------------------------------------------- #
+
+
+def _seed_paper_with_tables(
+    service: PaperbaseService,
+    arxiv_id: str,
+    *,
+    pdf_bytes: bytes = b"%PDF-fake",
+    legacy_table_rows: list[list[str]] | None = None,
+    indexed_at=None,
+) -> str:
+    """Seed an indexed paper plus a stored PDF + a stale tables index +
+    a stale ``chunk_kind='table'`` row, so a reindex test can verify
+    both blobs and chunks get refreshed."""
+    paper = PaperMetadata(
+        arxiv_id=arxiv_id,
+        title=f"Paper {arxiv_id}",
+        abstract="Abstract.",
+        published="2024-01-01",
+        index_status="indexed",
+    )
+    stored = service.repository.upsert_paper(
+        paper, search_document=paper.abstract, embedding=[0.1, 0.2, 0.3]
+    )
+    if indexed_at is not None:
+        # Patch the stored row's indexed_at so list_papers_for_table_reindex
+        # ordering tests behave deterministically.
+        service.repository.papers[stored.paper_id] = stored.model_copy(
+            update={"indexed_at": indexed_at}
+        )
+    service.object_store.put_bytes(
+        f"papers/{stored.paper_id}/raw/paper.pdf",
+        pdf_bytes,
+        content_type="application/pdf",
+    )
+    # Stale equation-as-table blob from the old extractor.
+    service.object_store.put_text(
+        f"papers/{stored.paper_id}/tables/index.json",
+        '[{"table_id": "stale-equation", "caption": "x = y^2"}]',
+    )
+    service.object_store.put_bytes(
+        f"papers/{stored.paper_id}/tables/stale-equation.json",
+        b'[{"col_0":"x = y^2"}]',
+    )
+    # Stale chunk_kind='table' row plus a section chunk that must be
+    # preserved across the reindex.
+    service.repository.replace_text_chunks(
+        stored.paper_id,
+        [
+            {
+                "path": "sections/intro.md",
+                "chunk_kind": "section",
+                "content": "Intro body.",
+                "embedding": [0.5, 0.5, 0.5],
+                "chunk_index": 0,
+                "section_depth": 1,
+                "section_order": 0,
+            },
+            {
+                "path": "tables/stale-equation.json",
+                "chunk_kind": "table",
+                "content": "x = y^2",
+                "embedding": [0.9, 0.9, 0.9],
+                "chunk_index": 0,
+                "section_depth": 1,
+                "section_order": 0,
+            },
+        ],
+    )
+    return stored.paper_id
+
+
+def _patch_extract_with_docling(monkeypatch, tables: list[TableArtifact]) -> None:
+    """Make service.extract_with_docling deterministic for reindex tests."""
+    def fake_extract(_pdf_bytes: bytes) -> ExtractionOutput:
+        return ExtractionOutput(
+            source_type="pdf-docling",
+            text_markdown="# hi",
+            tables=tables,
+            raw_artifacts=[],
+        )
+
+    monkeypatch.setattr("paperbase.service.extract_with_docling", fake_extract)
+
+
+def test_reindex_tables_for_paper_rewrites_index_and_replaces_table_chunks(
+    service: PaperbaseService, monkeypatch
+):
+    """Happy path: stored PDF gets re-extracted, the stale tables/
+    blobs are wiped, fresh blobs are written, and the
+    chunk_kind='table' rows are swapped for the new extraction's
+    tables. Section / full_text chunks are preserved."""
+    new_tables = [
+        TableArtifact(table_id="t-real", caption="Real table.", rows=[["A", "B"], ["1", "2"]])
+    ]
+    _patch_extract_with_docling(monkeypatch, new_tables)
+    service.embeddings = _StubEmbeddings()
+    paper_id = _seed_paper_with_tables(service, "2401.10001")
+
+    result = service.reindex_tables(limit=10)
+    assert result == {"papers_updated": 1, "papers_skipped": 0}
+
+    # Old equation-as-table blob is gone; new index reflects only real tables.
+    assert not service.object_store.exists(
+        f"papers/{paper_id}/tables/stale-equation.json"
+    )
+    new_index = json.loads(
+        service.object_store.get_text(f"papers/{paper_id}/tables/index.json")
+    )
+    assert [entry["table_id"] for entry in new_index] == ["t-real"]
+
+    # Chunk-level: section is preserved, stale table chunk is replaced.
+    remaining = service.repository.text_chunks[paper_id]
+    kinds = [c["chunk_kind"] for c in remaining]
+    assert "section" in kinds  # untouched
+    table_chunks = [c for c in remaining if c["chunk_kind"] == "table"]
+    assert len(table_chunks) == 1
+    assert "t-real" in table_chunks[0]["path"]
+
+
+def test_reindex_tables_skips_papers_without_stored_pdf(
+    service: PaperbaseService, monkeypatch
+):
+    """No PDF in object store → outcome is 'skipped', existing blobs and
+    chunks are untouched. Mirrors how reindex_embeddings tolerates rows
+    that lost their raw artifact."""
+    _patch_extract_with_docling(monkeypatch, [])
+    service.embeddings = _StubEmbeddings()
+    paper = PaperMetadata(
+        arxiv_id="2401.10002",
+        title="No PDF Paper",
+        abstract="No PDF.",
+        published="2024-01-01",
+        index_status="indexed",
+    )
+    service.repository.upsert_paper(paper, search_document=paper.abstract)
+
+    result = service.reindex_tables(limit=10)
+    assert result == {"papers_updated": 0, "papers_skipped": 1}
+
+
+def test_reindex_tables_drops_zero_table_papers_cleanly(
+    service: PaperbaseService, monkeypatch
+):
+    """When the fixed extractor finds NO real tables in a paper that
+    previously had equation-tables, the reindex must (a) report
+    'updated' (this IS a state change), (b) remove the stale
+    tables/index.json, and (c) leave zero chunk_kind='table' rows."""
+    _patch_extract_with_docling(monkeypatch, [])
+    service.embeddings = _StubEmbeddings()
+    paper_id = _seed_paper_with_tables(service, "2401.10003")
+
+    result = service.reindex_tables(limit=10)
+    assert result == {"papers_updated": 1, "papers_skipped": 0}
+    assert not service.object_store.exists(f"papers/{paper_id}/tables/index.json")
+    remaining = service.repository.text_chunks[paper_id]
+    assert all(c["chunk_kind"] != "table" for c in remaining)
+
+
+def test_reindex_tables_respects_indexed_before_cutover(
+    service: PaperbaseService, monkeypatch
+):
+    """``--indexed-before`` skips rows ingested after the fix-rollout
+    timestamp. Critical because re-extracting rows that are already on
+    the fixed extractor is pure waste — and on a worker with
+    concurrency=1, that waste blocks the in-flight harvest."""
+    from datetime import datetime, timezone
+
+    new_tables = [TableArtifact(table_id="t", caption=None, rows=[["a"]])]
+    _patch_extract_with_docling(monkeypatch, new_tables)
+    service.embeddings = _StubEmbeddings()
+    before_cutover = datetime(2026, 5, 14, 22, 0, tzinfo=timezone.utc)
+    after_cutover = datetime(2026, 5, 14, 23, 0, tzinfo=timezone.utc)
+    cutover = datetime(2026, 5, 14, 22, 42, tzinfo=timezone.utc)
+
+    _seed_paper_with_tables(service, "2401.20001", indexed_at=before_cutover)
+    _seed_paper_with_tables(service, "2401.20002", indexed_at=after_cutover)
+
+    result = service.reindex_tables(limit=10, indexed_before=cutover)
+    assert result == {"papers_updated": 1, "papers_skipped": 0}
+
+
+def test_enqueue_reindex_tables_job_serializes_indexed_before(service: PaperbaseService):
+    from datetime import datetime, timezone
+
+    cutover = datetime(2026, 5, 14, 22, 42, tzinfo=timezone.utc)
+    job = service.enqueue_reindex_tables_job(limit=500, indexed_before=cutover)
+    assert job.job_type == "reindex_tables"
+    assert job.payload["limit"] == 500
+    assert job.payload["indexed_before"] == cutover.isoformat()
+
+
+def test_process_next_job_dispatches_reindex_tables(
+    service: PaperbaseService, monkeypatch
+):
+    """End-to-end: enqueue the job, let the worker pick it up, confirm
+    completion. Smoke test that the dispatch wiring is plugged in."""
+    _patch_extract_with_docling(
+        monkeypatch,
+        [TableArtifact(table_id="t1", caption=None, rows=[["a", "b"]])],
+    )
+    service.embeddings = _StubEmbeddings()
+    _seed_paper_with_tables(service, "2401.30001")
+
+    service.enqueue_reindex_tables_job(limit=10)
+    completed = service.process_next_job()
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.job_type == "reindex_tables"

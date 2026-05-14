@@ -26,7 +26,7 @@ from collections.abc import Generator, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -50,6 +50,7 @@ from .emailer import EmailSender, ResendEmailSender
 from .extractors import (
     build_manifest,
     extract_github_candidates,
+    extract_with_docling,
     rank_github_candidates,
     extract_uploaded_document,
     figure_index_payload,
@@ -10038,6 +10039,170 @@ ReactDOM.createRoot(root).render(e(App));
         )
         return {"papers_updated": papers_updated, "chunks_updated": chunks_updated}
 
+    def enqueue_reindex_tables_job(
+        self,
+        *,
+        limit: int = 100_000,
+        indexed_before: datetime | None = None,
+    ) -> JobResponse:
+        """Queue a worker job that re-runs the docling table extractor
+        against stored PDFs and rewrites ``tables/index.json`` +
+        per-table blobs + ``chunk_kind='table'`` text chunks. Used to
+        clean up rows ingested under a buggy extractor without
+        repeating the much more expensive PDF re-fetch + full re-embed
+        of the rest of the paper."""
+        payload: dict[str, Any] = {"limit": limit}
+        if indexed_before is not None:
+            payload["indexed_before"] = indexed_before.isoformat()
+        job = self.repository.create_job("reindex_tables", payload)
+        logger.info(
+            "Created tables reindex job",
+            extra={
+                "event": "jobs.reindex_tables.created",
+                "job_id": job.job_id,
+                "limit": limit,
+                "indexed_before": payload.get("indexed_before"),
+            },
+        )
+        return job
+
+    def reindex_tables(
+        self,
+        *,
+        limit: int,
+        indexed_before: datetime | None = None,
+        tracking_job: JobResponse | None = None,
+    ) -> dict[str, int]:
+        """Iterate indexed papers, re-extract tables-only from their
+        stored PDFs, and rewrite the table storage blobs +
+        ``chunk_kind='table'`` text chunks. Section / full_text chunks
+        and paper-level embeddings are untouched.
+
+        ``indexed_before`` scopes the sweep to rows that were ingested
+        before a known fix-rollout timestamp (e.g. the PR #78 deploy
+        cutover). ``limit`` caps total papers processed across pages.
+        """
+        papers_updated = 0
+        papers_skipped = 0
+        remaining = limit
+        page = max(8, min(limit, 64))
+        after: PaperResponse | None = None
+
+        while remaining > 0:
+            self._raise_if_current_job_canceled()
+            batch = self.repository.list_papers_for_table_reindex(
+                limit=min(page, remaining),
+                indexed_before=indexed_before,
+                after=after,
+            )
+            if not batch:
+                break
+            for paper in batch:
+                self._raise_if_current_job_canceled()
+                outcome = self._reindex_tables_for_paper(paper)
+                if outcome == "updated":
+                    papers_updated += 1
+                else:
+                    papers_skipped += 1
+                if tracking_job is not None:
+                    self.repository.record_job_paper(
+                        tracking_job.job_id,
+                        paper.paper_id,
+                        outcome=outcome,
+                        arxiv_id=paper.arxiv_id,
+                        title=paper.title,
+                    )
+                remaining -= 1
+                if remaining <= 0:
+                    break
+            after = batch[-1]
+            logger.info(
+                "Tables reindex progress",
+                extra={
+                    "event": "reindex_tables.progress",
+                    "papers_updated": papers_updated,
+                    "papers_skipped": papers_skipped,
+                },
+            )
+        logger.info(
+            "Completed tables reindex",
+            extra={
+                "event": "reindex_tables.completed",
+                "papers_updated": papers_updated,
+                "papers_skipped": papers_skipped,
+            },
+        )
+        return {"papers_updated": papers_updated, "papers_skipped": papers_skipped}
+
+    def _reindex_tables_for_paper(self, paper: PaperResponse) -> str:
+        """Returns ``'updated'`` if tables were re-extracted (even to
+        zero tables — that's a legitimate state when the prior run
+        misclassified equations as tables and the fixed scanner finds
+        none). Returns ``'skipped'`` if the stored PDF is missing or
+        docling is unavailable in this process."""
+        paper_id = paper.paper_id
+        pdf_path = f"papers/{paper_id}/raw/paper.pdf"
+        if not self.object_store.exists(pdf_path):
+            return "skipped"
+        try:
+            pdf_bytes = self.object_store.get_bytes(pdf_path)
+        except Exception:
+            return "skipped"
+        extraction = extract_with_docling(pdf_bytes)
+        if extraction is None:
+            # docling unavailable / failed; preserve the existing blobs.
+            return "skipped"
+
+        # Wipe the existing tables/ prefix before writing the fresh
+        # index, so equation-tables that the buggy scanner emitted are
+        # actually removed (not just left orphaned alongside the new
+        # index.json). ``delete_prefix`` adds its own trailing slash, so
+        # pass the unqualified prefix.
+        self.object_store.delete_prefix(f"papers/{paper_id}/tables")
+        if extraction.tables:
+            self.object_store.put_text(
+                f"papers/{paper_id}/tables/index.json",
+                json.dumps(table_index_payload(extraction.tables), indent=2),
+                content_type="application/json",
+            )
+            for table in extraction.tables:
+                self.object_store.put_bytes(
+                    f"papers/{paper_id}/tables/{table.table_id}.json",
+                    table_json_bytes(table),
+                    content_type="application/json",
+                )
+                self.object_store.put_bytes(
+                    f"papers/{paper_id}/tables/{table.table_id}.csv",
+                    table_csv_bytes(table),
+                    content_type="text/csv",
+                )
+
+        # Rebuild ``chunk_kind='table'`` chunks + embed them so the
+        # vector index no longer carries equation-as-table contamination.
+        new_chunks: list[dict[str, Any]] = []
+        cap = self.settings.chunk_max_chars + self.settings.chunk_overlap_chars
+        for table_order, table in enumerate(extraction.tables):
+            table_text = _table_to_indexable_text(table)
+            if not table_text:
+                continue
+            new_chunks.append(
+                {
+                    "path": f"tables/{table.table_id}.json",
+                    "chunk_kind": "table",
+                    "content": table_text[:cap],
+                    "chunk_index": 0,
+                    "section_depth": 1,
+                    "section_order": table_order,
+                }
+            )
+        if new_chunks and self.embeddings is not None:
+            vectors = self.embeddings.encode_batch([c["content"] for c in new_chunks])
+            if vectors is not None and len(vectors) == len(new_chunks):
+                for chunk, vector in zip(new_chunks, vectors):
+                    chunk["embedding"] = vector
+        self.repository.replace_table_chunks(paper_id, new_chunks)
+        return "updated"
+
     def enqueue_enrich_missing_metadata_job(
         self,
         *,
@@ -11901,6 +12066,26 @@ ReactDOM.createRoot(root).render(e(App));
                     rewrite_existing=bool(
                         job.payload.get("rewrite_existing", job.job_type == "reindex_embeddings")
                     ),
+                    tracking_job=job,
+                )
+            elif job.job_type == "reindex_tables":
+                raw_before = job.payload.get("indexed_before")
+                parsed_before: datetime | None = None
+                if isinstance(raw_before, str) and raw_before:
+                    try:
+                        parsed_before = datetime.fromisoformat(raw_before)
+                    except ValueError:
+                        logger.warning(
+                            "reindex_tables job has malformed indexed_before",
+                            extra={
+                                "event": "jobs.reindex_tables.malformed_indexed_before",
+                                "job_id": job.job_id,
+                                "indexed_before": raw_before,
+                            },
+                        )
+                self.reindex_tables(
+                    limit=int(job.payload.get("limit", 100_000)),
+                    indexed_before=parsed_before,
                     tracking_job=job,
                 )
             elif job.job_type == "enrich_missing_metadata":
