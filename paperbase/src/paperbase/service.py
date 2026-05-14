@@ -11183,6 +11183,14 @@ ReactDOM.createRoot(root).render(e(App));
             "pages_fetched": pages_fetched,
         }
 
+    # Maximum consecutive arxiv-side transient failures (429 / timeout)
+    # tolerated within one harvest_top_cited chunk before we abort the
+    # chunk so the worker's retry-with-backoff can let arxiv cool off.
+    # Observed: setting this too high (or absent) means a single 429
+    # storm burns through all of a chunk's ids one at a time before
+    # finally dying, wasting per-id calls and slowing the entire run.
+    _ARXIV_TOP_CITED_CONSECUTIVE_FAILURE_LIMIT = 3
+
     def run_harvest_chunk_top_cited(
         self,
         *,
@@ -11195,16 +11203,22 @@ ReactDOM.createRoot(root).render(e(App));
 
         Iterates ``arxiv_ids`` and calls ``index_arxiv_paper`` per id.
         Per-id ``PermanentError`` is swallowed so a 404 doesn't fail the
-        whole chunk; the retry policy still catches transient failures
-        on the chunk as a whole. ``min_citations`` is carried for
-        observability — server-side bulk search already filtered by
-        citation count.
+        whole chunk. Per-id arxiv transients (HTTP 429 / read timeout /
+        connection error) are also swallowed up to
+        ``_ARXIV_TOP_CITED_CONSECUTIVE_FAILURE_LIMIT`` consecutive
+        failures, after which the chunk is aborted so the retry policy
+        can give arxiv a backoff window. Without this guard, a single
+        429 storm took out 18/20 chunks in one harvest because each id's
+        429 propagated up and killed the parent chunk on the first hit.
+        ``min_citations`` is carried for observability — server-side
+        bulk search already filtered by citation count.
         """
         if not arxiv_ids:
             return {"requested": 0, "indexed": 0, "skipped": 0}
         run_harvest_id = harvest_id or new_id("harvest")
         indexed = 0
         skipped = 0
+        consecutive_arxiv_errors = 0
         for arxiv_id in arxiv_ids:
             self._raise_if_current_job_canceled()
             if not arxiv_id:
@@ -11217,6 +11231,7 @@ ReactDOM.createRoot(root).render(e(App));
                     tracking_job=tracking_job,
                 )
                 indexed += 1
+                consecutive_arxiv_errors = 0
             except PermanentError:
                 if tracking_job is not None:
                     self.repository.record_job_paper(
@@ -11225,6 +11240,29 @@ ReactDOM.createRoot(root).render(e(App));
                         outcome="failed",
                         arxiv_id=arxiv_id,
                     )
+                skipped += 1
+                continue
+            except (
+                requests.HTTPError,
+                requests.Timeout,
+                requests.ConnectionError,
+            ) as exc:
+                consecutive_arxiv_errors += 1
+                logger.warning(
+                    "harvest_top_cited per-id arxiv transient",
+                    extra={
+                        "event": "harvest_top_cited.arxiv_transient",
+                        "harvest_id": run_harvest_id,
+                        "arxiv_id": arxiv_id,
+                        "error_type": type(exc).__name__,
+                        "consecutive_errors": consecutive_arxiv_errors,
+                    },
+                )
+                if (
+                    consecutive_arxiv_errors
+                    >= self._ARXIV_TOP_CITED_CONSECUTIVE_FAILURE_LIMIT
+                ):
+                    raise
                 skipped += 1
                 continue
         logger.info(
