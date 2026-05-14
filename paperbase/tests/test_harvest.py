@@ -5,6 +5,8 @@ from datetime import date
 import pytest
 
 from paperbase.config import Settings
+import requests
+
 from paperbase.errors import PermanentError
 from paperbase.models import PaperMetadata
 from paperbase.rate_limit import TokenBucketRateLimiter
@@ -831,6 +833,92 @@ def test_run_harvest_chunk_top_cited_handles_empty_payload():
         "indexed": 0,
         "skipped": 0,
     }
+
+
+def test_run_harvest_chunk_top_cited_swallows_isolated_arxiv_transient(monkeypatch):
+    """A single per-id arxiv 429 / timeout must not kill the chunk — the
+    id is skipped and the loop continues. Regression guard: before the
+    fix, one 429 propagated up and dropped the remaining ids on the
+    floor, taking out 18/20 chunks in a single harvest."""
+    service = _service()
+    calls: list[str] = []
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        calls.append(arxiv_id)
+        if arxiv_id == "2020.flaky":
+            response = requests.Response()
+            response.status_code = 429
+            raise requests.HTTPError("429 Client Error", response=response)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    result = service.run_harvest_chunk_top_cited(
+        arxiv_ids=["2020.00001", "2020.flaky", "2020.00003"],
+        min_citations=100,
+    )
+
+    assert calls == ["2020.00001", "2020.flaky", "2020.00003"]
+    assert result == {"requested": 3, "indexed": 2, "skipped": 1}
+
+
+def test_run_harvest_chunk_top_cited_aborts_on_consecutive_arxiv_transients(monkeypatch):
+    """After N consecutive arxiv transients the chunk re-raises so the
+    worker's retry-with-backoff can give arxiv a cooldown window
+    rather than burning through every remaining id one 429 at a time."""
+    service = _service()
+    limit = service._ARXIV_TOP_CITED_CONSECUTIVE_FAILURE_LIMIT
+    attempted: list[str] = []
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        attempted.append(arxiv_id)
+        response = requests.Response()
+        response.status_code = 429
+        raise requests.HTTPError("429 Client Error", response=response)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    with pytest.raises(requests.HTTPError):
+        service.run_harvest_chunk_top_cited(
+            arxiv_ids=[f"2020.{i:05d}" for i in range(10)],
+            min_citations=100,
+        )
+
+    # We aborted exactly at the limit and did not march through the
+    # remaining 7 ids.
+    assert attempted == [f"2020.{i:05d}" for i in range(limit)]
+
+
+def test_run_harvest_chunk_top_cited_resets_consecutive_counter_on_success(monkeypatch):
+    """Successful ids between transients reset the failure counter, so
+    a chunk with scattered 429s among mostly-healthy ids completes
+    cleanly instead of tripping the circuit breaker."""
+    service = _service()
+    limit = service._ARXIV_TOP_CITED_CONSECUTIVE_FAILURE_LIMIT
+    flaky_ids = {"2020.flaky_a", "2020.flaky_b"}
+
+    def fake_index(arxiv_id, *, paper=None, force=False):
+        if arxiv_id in flaky_ids:
+            response = requests.Response()
+            response.status_code = 429
+            raise requests.HTTPError("429 Client Error", response=response)
+
+    monkeypatch.setattr(service, "index_arxiv_paper", fake_index)
+
+    # Two transients interleaved with successes — neither run hits the
+    # consecutive threshold.
+    arxiv_ids = [
+        "2020.00001",
+        "2020.flaky_a",
+        "2020.00002",
+        "2020.00003",
+        "2020.flaky_b",
+        "2020.00004",
+    ]
+    assert limit >= 2  # otherwise this scenario can't exist
+    result = service.run_harvest_chunk_top_cited(
+        arxiv_ids=arxiv_ids, min_citations=100,
+    )
+    assert result == {"requested": 6, "indexed": 4, "skipped": 2}
 
 
 def test_default_priority_top_cited_matches_harvest_range():
