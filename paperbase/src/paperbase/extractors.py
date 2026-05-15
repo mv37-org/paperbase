@@ -91,12 +91,17 @@ def _strip_noise_suffix(slug: str) -> str:
     mash-up evidence on their own. ``http`` / ``https`` are the only
     suffixes we strip unconditionally because they are essentially
     never legitimate trailing tokens in a repo name.
+
+    The ``always`` tier accepts slugs as short as 3 chars after the
+    strip — ``DIMhttps`` (a real prod failure on `1808.06670`) leaves
+    only ``DIM`` after removing ``https``, which is a legitimate short
+    repo name we don't want to discard.
     """
     if not slug:
         return slug
     lower = slug.lower()
     for suffix in _REPO_SLUG_NOISE_SUFFIXES_ALWAYS:
-        if lower.endswith(suffix) and len(slug) - len(suffix) >= 4:
+        if lower.endswith(suffix) and len(slug) - len(suffix) >= 3:
             stripped = _trim_repo_slug(slug, suffix)
             if stripped is not None:
                 return stripped
@@ -112,6 +117,24 @@ def _strip_noise_suffix(slug: str) -> str:
         if stripped is not None:
             return stripped
     return slug
+
+
+def _split_at_interior_url_scheme(url: str) -> str:
+    """When the greedy URL regex captures across a missing-whitespace
+    boundary between two adjacent URLs, the capture looks like
+    ``https://github.com/owner/REPOhttps://github.com/...``. Trim at
+    the first interior ``http`` / ``https`` (i.e. after the protocol
+    slug) so downstream normalization sees just the first URL.
+
+    Operates only past position 8 to leave the legitimate leading
+    ``https://`` scheme intact.
+    """
+    if not url:
+        return url
+    inner = url.find("http", 8)
+    if inner > 0:
+        return url[:inner]
+    return url
 
 
 def _trim_repo_slug(slug: str, suffix: str) -> str | None:
@@ -158,6 +181,12 @@ def extract_github_candidates(abstract: str, body: str) -> list[GitHubUrlCandida
     combined = f"{abstract or ''}\n{body or ''}"
     for match in _GITHUB_URL_RE.finditer(combined):
         raw = match.group(0)
+        # First: split off any trailing concatenated URL the greedy
+        # regex swallowed. Observed live on `1808.06670` (DIM paper):
+        # the capture was `github.com/rdevon/DIMhttps`, where the next
+        # paragraph's `https://...` lost its whitespace boundary and
+        # got tacked onto the repo slug.
+        raw = _split_at_interior_url_scheme(raw)
         while raw and raw[-1] in _GITHUB_URL_TRAILING_JUNK:
             raw = raw[:-1]
         if raw.endswith(".git"):
