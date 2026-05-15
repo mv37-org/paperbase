@@ -821,6 +821,98 @@ def test_rank_github_candidates_author_affinity_tips_the_scale():
     assert winner.url == "https://github.com/google-research/paper"
 
 
+def test_rank_github_candidates_title_affinity_picks_paper_repo_over_baseline():
+    """Regression for the holistic-audit Bug B (PyTorch paper → wrong
+    repo). When the paper cites a baseline repo whose slug shares no
+    token with the title, the title-affinity bonus tips toward the
+    candidate that DOES share a title token. Mirrors the prod failure
+    shape `1912.01703` (PyTorch paper) → `lundalana/Bayesian-ID-Comparison`."""
+    body = (
+        "We compare against https://github.com/lundalana/Bayesian-ID-Comparison "
+        "and release our implementation at https://github.com/pytorch/pytorch."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(
+        candidates,
+        abstract="",
+        body=body,
+        title="PyTorch: An Imperative Style, High-Performance Deep Learning Library",
+    )
+    assert winner is not None
+    assert winner.url == "https://github.com/pytorch/pytorch"
+
+
+def test_rank_github_candidates_title_affinity_ignores_stopwords():
+    """Generic ML titles ("Deep Learning for X") must NOT blanket-
+    bonus every candidate whose slug contains `deep` or `learning`.
+    Without the stopword filter, a baseline-style title would match
+    too many citation-repos and the bonus would lose discrimination."""
+    body = (
+        "Compared with https://github.com/some-org/deep-learning-baseline. "
+        "Our implementation: https://github.com/author/diffusion-model."
+    )
+    candidates = extract_github_candidates("", body)
+    # Title is purely generic ML stopwords; the bonus should not fire
+    # for either candidate, so neither gets the +1.5 tip-over.
+    winner = rank_github_candidates(
+        candidates,
+        abstract="",
+        body=body,
+        title="Deep Learning Methods for Neural Networks",
+    )
+    # With no discriminator firing, the 2-way tiebreak by first-mention
+    # picks the baseline (mentioned first). The point of this test is
+    # that title-affinity didn't fire on either side, so the result
+    # falls back to existing logic — not that this is the right
+    # answer for *this* hypothetical paper.
+    assert winner is not None
+    assert winner.url == "https://github.com/some-org/deep-learning-baseline"
+
+
+def test_rank_github_candidates_title_affinity_matches_repo_slug():
+    """The title-affinity bonus reads from the REPO slug too, not just
+    the owner. Real-world example: ResNet (`1512.03385`, title contains
+    'Residual') cites baseline repos whose slugs share no token with
+    'Residual', while its own repo slug includes `residual`."""
+    body = (
+        "Baselines from https://github.com/chen2014/imagenet-baseline. "
+        "Our code: https://github.com/KaimingHe/deep-residual-networks."
+    )
+    candidates = extract_github_candidates("", body)
+    winner = rank_github_candidates(
+        candidates,
+        abstract="",
+        body=body,
+        title="Deep Residual Learning for Image Recognition",
+    )
+    assert winner is not None
+    # `residual` is in the title (and so is `image`, `recognition`);
+    # the baseline candidate's slug shares no non-stopword token.
+    assert winner.url == "https://github.com/KaimingHe/deep-residual-networks"
+
+
+def test_rank_github_candidates_title_affinity_no_match_falls_back_cleanly():
+    """When the repo uses an acronym not present in the spelled-out
+    title (e.g. DDIM's `ermongroup/ddim` vs title "Denoising Diffusion
+    Implicit Models"), the title-affinity bonus simply doesn't fire
+    for either candidate — the existing ranker logic handles the rest.
+    Regression guard: title-affinity must NOT crash or false-positive
+    when no candidate matches."""
+    body = (
+        "Inspired by https://github.com/ajbrock/BigGAN-PyTorch. "
+        "Code: https://github.com/ermongroup/ddim."
+    )
+    candidates = extract_github_candidates("", body)
+    # Both candidates score equally on the title axis (zero) — the
+    # function must still return a winner via the existing 2-way
+    # tiebreak (first-mention).
+    winner = rank_github_candidates(
+        candidates, abstract="", body=body,
+        title="Denoising Diffusion Implicit Models",
+    )
+    assert winner is not None
+
+
 def test_rank_github_candidates_frequency_boost():
     """Same repo mentioned multiple times in the body outranks a
     one-off reference elsewhere."""

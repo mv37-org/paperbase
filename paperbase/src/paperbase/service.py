@@ -12899,6 +12899,7 @@ ReactDOM.createRoot(root).render(e(App));
                         abstract=metadata.abstract or "",
                         body=extraction.text_markdown or "",
                         authors=metadata.authors or "",
+                        title=metadata.title or "",
                     )
                     if winner is not None:
                         metadata.code_url = winner.url
