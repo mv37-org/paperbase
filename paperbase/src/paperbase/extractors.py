@@ -230,6 +230,7 @@ def rank_github_candidates(
     abstract: str,
     body: str,
     authors: str = "",
+    title: str = "",
     min_margin: float = 0.2,
     tie_window: float = 0.05,
 ) -> GitHubUrlCandidate | None:
@@ -254,6 +255,13 @@ def rank_github_candidates(
     - ``+1.0`` canonical form (no ``/tree``, ``/blob``, ``?``, ``#``)
     - ``+1.5`` owner slug matches an author-affiliation token
       (``google-research``, ``facebookresearch``, ``microsoft``, …)
+    - ``+1.5`` owner or repo slug contains a content-token from the
+      paper title (excluding generic ML stopwords). Catches the case
+      where the paper cites a baseline repo (e.g. PyTorch paper that
+      mentions ``lundalana/Bayesian-ID-Comparison`` in references)
+      versus its own (``pytorch/pytorch``) — only the latter shares
+      a token with the title. Symmetric to the author-affinity bonus
+      and applied at the same weight.
     - ``+1.0`` URL appears in abstract; ``+0.3`` body-only
     - ``+0.3`` per extra body mention beyond the first (cap ``+0.9``)
 
@@ -266,6 +274,7 @@ def rank_github_candidates(
     if not candidates:
         return None
     author_tokens = _author_affinity_tokens(authors)
+    title_tokens = _title_affinity_tokens(title)
     abstract_lower = (abstract or "").lower()
     body_lower = (body or "").lower()
     scored: list[tuple[float, GitHubUrlCandidate]] = []
@@ -274,6 +283,8 @@ def rank_github_candidates(
         if not candidate.has_subpath:
             score += 1.0
         if _owner_matches_authors(candidate.owner, author_tokens):
+            score += 1.5
+        if _slug_matches_title(candidate.owner, candidate.repo, title_tokens):
             score += 1.5
         pattern = f"github.com/{candidate.owner.lower()}/{candidate.repo.lower()}"
         if pattern in abstract_lower:
@@ -335,6 +346,62 @@ def _owner_matches_authors(owner: str, author_tokens: set[str]) -> bool:
     owner_parts = re.findall(r"[a-z]+", owner.lower())
     for part in owner_parts:
         if len(part) >= 4 and part in author_tokens:
+            return True
+    return False
+
+
+# Stopwords that appear in many ML paper titles but say nothing about
+# *which* paper this is. Excluded from the title-affinity check so a
+# generic title like "Deep Learning for X" doesn't blanket-bonus every
+# candidate whose slug contains "deep" or "learning".
+_TITLE_AFFINITY_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # Glue words
+        "with", "from", "into", "onto", "upon", "over", "under",
+        "between", "through", "without", "about", "their", "these",
+        "those", "while", "where", "which", "what", "than", "this",
+        "that", "they", "them", "have", "been", "such",
+        # Generic ML / paper vocabulary
+        "model", "models", "network", "networks", "learning", "training",
+        "trained", "deep", "neural", "method", "methods", "approach",
+        "approaches", "system", "systems", "using", "based", "framework",
+        "study", "novel", "general", "scalable", "efficient", "improved",
+        "improving", "towards", "evaluation", "analysis", "survey",
+        "introduction", "implementation", "performance", "scale", "large",
+    }
+)
+
+
+def _title_affinity_tokens(title: str) -> set[str]:
+    """Token set the title-affinity bonus draws from. Symmetric to
+    :func:`_author_affinity_tokens` but with an ML-specific stopword
+    filter so generic ``Deep Learning``-style titles don't blanket-
+    match every candidate. Tokens shorter than 4 chars are skipped
+    so a paper title of ``LSTM`` / ``BERT`` doesn't fire on every
+    candidate slug containing ``lstm``/``bert`` (those tend to be
+    citations, not the paper's own repo)."""
+    if not title:
+        return set()
+    tokens: set[str] = set()
+    for part in _AFFINITY_TOKEN_RE.findall(title.lower()):
+        if len(part) >= 4 and part not in _TITLE_AFFINITY_STOPWORDS:
+            tokens.add(part)
+    return tokens
+
+
+def _slug_matches_title(
+    owner: str, repo: str, title_tokens: set[str]
+) -> bool:
+    """True if the owner OR repo slug contains a non-stopword token
+    that also appears in the paper title. Splits on non-alpha so
+    ``BigGAN-PyTorch`` → {``biggan``, ``pytorch``} and a paper titled
+    ``PyTorch ...`` matches, while ``Bayesian-ID-Comparison`` against
+    the same title does not."""
+    if (not owner and not repo) or not title_tokens:
+        return False
+    parts = re.findall(r"[a-z]+", f"{owner.lower()} {repo.lower()}")
+    for part in parts:
+        if len(part) >= 4 and part in title_tokens:
             return True
     return False
 
