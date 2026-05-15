@@ -1231,3 +1231,110 @@ def test_scan_docling_tables_no_op_on_non_dict_or_missing_tables():
     _scan_docling_tables({"texts": []}, out)
     _scan_docling_tables({"tables": "not-a-list"}, out)
     assert out == []
+
+
+# --- equation-table heuristic filter --------------------------------------- #
+
+
+def test_scan_docling_tables_drops_latex_macro_placeholder_table():
+    """Observed live on multiple papers (1902.09212, 1512.03385, ...):
+    docling emits 1x1 'tables' whose only cell is a LaTeX macro
+    argument placeholder like `#1@#2`. Those never appear in real
+    table data and are the cleanest equation signal we have."""
+    payload = {
+        "tables": [
+            _docling_table_item([["#1@#2"]]),
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert out == []
+
+
+def test_scan_docling_tables_drops_pure_math_table():
+    """Observed live on `0707.1889`: docling emits 2x2 'tables' whose
+    cells are inline-math like `$e^i$`, `$1/2$`, `$ $`. Pure math
+    cells in a small table → drop."""
+    payload = {
+        "tables": [
+            _docling_table_item([["$ $", "$$"], ["$e^i$", "$^2/2$"]]),
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert out == []
+
+
+def test_scan_docling_tables_drops_table_dominated_by_math_cells():
+    """A table where ≥70% of non-empty cells look like math is still
+    almost certainly an equation layout, even at larger sizes
+    (e.g. an alignment environment with one descriptive label)."""
+    payload = {
+        "tables": [
+            _docling_table_item(
+                [
+                    ["Eq.", "$x$", "$y$"],
+                    ["$1$", "$=$", "$y^2$"],
+                    ["$2$", "$+$", "$1$"],
+                ]
+            ),
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert out == []
+
+
+def test_scan_docling_tables_keeps_real_numeric_comparison_table():
+    """Regression guard: real benchmark tables with short numeric cells
+    (like accuracy / F1 / param counts) must NOT trip the equation
+    filter. These have no LaTeX math markers and real word labels."""
+    payload = {
+        "tables": [
+            _docling_table_item(
+                [
+                    ["Model", "Acc", "F1"],
+                    ["BERT", "0.87", "0.85"],
+                    ["GPT-3", "0.91", "0.90"],
+                    ["Mamba", "0.93", "0.91"],
+                ]
+            ),
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert len(out) == 1
+    assert out[0].rows[0] == ["Model", "Acc", "F1"]
+
+
+def test_scan_docling_tables_keeps_table_with_few_inline_math_cells():
+    """Mixed tables that happen to have one or two math cells (e.g.,
+    one column showing a derived metric in LaTeX) must NOT be dropped.
+    Threshold is 70% math cells; this table is well below."""
+    payload = {
+        "tables": [
+            _docling_table_item(
+                [
+                    ["Method", "Score", "Loss"],
+                    ["Adam", "92.1", "$L_1$"],
+                    ["SGD", "89.4", "$L_2$"],
+                    ["RMSProp", "90.7", "L2"],
+                    ["Adagrad", "88.0", "L1"],
+                ]
+            ),
+        ],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert len(out) == 1
+
+
+def test_scan_docling_tables_drops_all_empty_cells_table():
+    """Sometimes docling emits structurally-tabular regions with no
+    actual content (rendering artifacts). Treat as no-table."""
+    payload = {
+        "tables": [_docling_table_item([["", ""], ["", ""]])],
+    }
+    out: list[TableArtifact] = []
+    _scan_docling_tables(payload, out)
+    assert out == []

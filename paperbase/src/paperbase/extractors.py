@@ -1186,6 +1186,60 @@ def _docling_export_dict(document: object) -> dict:
     return {}
 
 
+# LaTeX macro argument placeholders ("#1", "#1@#2") that leak through
+# docling when an unprocessed macro body is OCR'd. These never appear in
+# real table data and are the strongest equation-table signal we have.
+_LATEX_MACRO_PLACEHOLDER_RE = re.compile(r"#\d+(?:@#?\d+)?")
+
+# Heuristic for "this cell looks like inline math, not a table value":
+# a $ / \ / ^ / _ marker is present AND the cell is short AND has no
+# run of 3+ alphabetic characters (which would suggest a real word).
+# Real numeric cells like "0.87" / "1.2k" / "30.5%" don't match —
+# they have no math markers.
+_MATH_MARKER_RE = re.compile(r"[$\\^_]")
+_REAL_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+
+
+def _looks_like_math_cell(cell: str) -> bool:
+    text = (cell or "").strip()
+    if not text:
+        return True
+    if _REAL_WORD_RE.search(text):
+        return False
+    if _MATH_MARKER_RE.search(text) and len(text) < 30:
+        return True
+    return False
+
+
+def _looks_like_equation_table(table: TableArtifact) -> bool:
+    """True if a TableArtifact docling labeled "table" is much more
+    likely an equation layout. Used as a second-line filter on top of
+    the structural label check, since docling's own table-detection
+    model still emits equations-as-tables on PDFs with dense math
+    typesetting (observed live on `0707.1889`, `1902.09212`).
+
+    Triggers when any of:
+
+    - A cell contains a LaTeX macro-argument placeholder like ``#1@#2``
+      (unambiguous equation residue).
+    - The table has zero non-empty cells.
+    - All non-empty cells in a tiny (≤3 cell) table look like math.
+    - ≥70% of non-empty cells in any table look like math.
+    """
+    if not table.rows:
+        return True
+    cells = [(cell or "").strip() for row in table.rows for cell in row]
+    nonempty = [cell for cell in cells if cell]
+    if any(_LATEX_MACRO_PLACEHOLDER_RE.search(cell) for cell in nonempty):
+        return True
+    if not nonempty:
+        return True
+    math_count = sum(1 for cell in nonempty if _looks_like_math_cell(cell))
+    if len(nonempty) <= 3 and math_count == len(nonempty):
+        return True
+    return math_count / len(nonempty) >= 0.7
+
+
 def _docling_grid_to_rows(grid: object) -> list[list[str]] | None:
     """Convert a docling ``data.grid`` (list of rows of cell dicts) into the
     plain ``list[list[str]]`` shape :class:`TableArtifact` expects. Returns
@@ -1277,9 +1331,17 @@ def _scan_docling_tables(payload: object, tables: list[TableArtifact]) -> None:
             continue
         table_id = raw.get("self_ref") or raw.get("id") or f"table-{len(tables) + 1}"
         caption = _docling_table_caption(raw)
-        tables.append(
-            TableArtifact(table_id=slugify(str(table_id)), caption=caption, rows=rows)
+        candidate = TableArtifact(
+            table_id=slugify(str(table_id)), caption=caption, rows=rows
         )
+        # Second-line filter: docling sometimes labels equation layouts
+        # "table" at the layout-model level. PR #78 stopped paperbase's
+        # own substring heuristic from amplifying that, but docling-side
+        # false positives still leak through. Drop them here so they
+        # don't pollute table chunks / the UI.
+        if _looks_like_equation_table(candidate):
+            continue
+        tables.append(candidate)
 
 
 def extract_with_docling(pdf_bytes: bytes) -> ExtractionOutput | None:
