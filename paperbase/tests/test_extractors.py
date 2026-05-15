@@ -914,6 +914,58 @@ def test_strip_noise_suffix_repairs_http_mashups_unconditionally():
     assert _strip_noise_suffix("repohttps") == "repo"
 
 
+def test_strip_noise_suffix_repairs_short_slug_http_mash():
+    """Observed live on `1808.06670` (DIM): the captured slug was
+    ``DIMhttps`` (8 chars) — only 3 chars remain after stripping
+    ``https``. The previous 4-char minimum left this case in place;
+    relaxing to 3 lets us recover real short repo names."""
+    from paperbase.extractors import _strip_noise_suffix
+
+    assert _strip_noise_suffix("DIMhttps") == "DIM"
+    assert _strip_noise_suffix("FOOhttp") == "FOO"
+
+
+def test_split_at_interior_url_scheme_trims_concatenated_url():
+    """When the URL regex swallows two adjacent URLs (PDF→markdown lost
+    the whitespace), the interior ``http`` / ``https`` is a clean
+    boundary marker. Real failure shape from prod:
+    ``https://github.com/rdevon/DIMhttps://github.com/...``."""
+    from paperbase.extractors import _split_at_interior_url_scheme
+
+    assert (
+        _split_at_interior_url_scheme(
+            "https://github.com/rdevon/DIMhttps://github.com/other/x"
+        )
+        == "https://github.com/rdevon/DIM"
+    )
+    # Also handles the bare-prose `*https` mash where there is no second
+    # protocol body, just a stray scheme token.
+    assert (
+        _split_at_interior_url_scheme("https://github.com/owner/REPOhttps")
+        == "https://github.com/owner/REPO"
+    )
+    # Single-URL inputs are untouched — find() returns -1.
+    assert (
+        _split_at_interior_url_scheme("https://github.com/owner/legit-repo")
+        == "https://github.com/owner/legit-repo"
+    )
+
+
+def test_extract_github_candidates_trims_concatenated_https_pair():
+    """End-to-end: a body containing two URLs without a whitespace
+    boundary must yield the FIRST URL cleanly, not a corrupted slug.
+    Regression guard for prod row 1808.06670 (DIM)."""
+    body = (
+        "Code at https://github.com/rdevon/DIMhttps://github.com/other/baseline"
+        " and the related repo."
+    )
+    candidates = extract_github_candidates(abstract="", body=body)
+    urls = {c.url for c in candidates}
+    assert "https://github.com/rdevon/DIM" in urls
+    # The concatenated tail should NOT round-trip as ``DIMhttps``.
+    assert all("DIMhttps" not in c.url for c in candidates)
+
+
 def test_strip_noise_suffix_preserves_legitimate_word_endings():
     """Regression for the over-strip arslnb caught on PR #45: real
     repos like ``interpretable``, ``roundtable``, ``release-notes``
