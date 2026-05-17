@@ -10099,7 +10099,7 @@ ReactDOM.createRoot(root).render(e(App));
                 break
             for paper in batch:
                 self._raise_if_current_job_canceled()
-                outcome = self._reindex_tables_for_paper(paper)
+                outcome, skip_reason = self._reindex_tables_for_paper(paper)
                 if outcome == "updated":
                     papers_updated += 1
                 else:
@@ -10109,6 +10109,7 @@ ReactDOM.createRoot(root).render(e(App));
                         tracking_job.job_id,
                         paper.paper_id,
                         outcome=outcome,
+                        skip_reason=skip_reason,
                         arxiv_id=paper.arxiv_id,
                         title=paper.title,
                     )
@@ -10134,24 +10135,29 @@ ReactDOM.createRoot(root).render(e(App));
         )
         return {"papers_updated": papers_updated, "papers_skipped": papers_skipped}
 
-    def _reindex_tables_for_paper(self, paper: PaperResponse) -> str:
-        """Returns ``'updated'`` if tables were re-extracted (even to
-        zero tables — that's a legitimate state when the prior run
-        misclassified equations as tables and the fixed scanner finds
-        none). Returns ``'skipped'`` if the stored PDF is missing or
-        docling is unavailable in this process."""
+    def _reindex_tables_for_paper(
+        self, paper: PaperResponse
+    ) -> tuple[str, str | None]:
+        """Returns ``('updated', None)`` if tables were re-extracted
+        (even to zero tables — that's a legitimate state when the
+        prior run misclassified equations as tables and the fixed
+        scanner finds none). Returns ``('skipped', <reason>)`` if the
+        stored PDF is missing or docling is unavailable. ``skip_reason``
+        is required by ``record_job_paper`` whenever outcome is
+        ``skipped`` so the admin UI can explain why each row was
+        passed over."""
         paper_id = paper.paper_id
         pdf_path = f"papers/{paper_id}/raw/paper.pdf"
         if not self.object_store.exists(pdf_path):
-            return "skipped"
+            return "skipped", "no_stored_pdf"
         try:
             pdf_bytes = self.object_store.get_bytes(pdf_path)
         except Exception:
-            return "skipped"
+            return "skipped", "pdf_fetch_failed"
         extraction = extract_with_docling(pdf_bytes)
         if extraction is None:
             # docling unavailable / failed; preserve the existing blobs.
-            return "skipped"
+            return "skipped", "docling_unavailable"
 
         # Wipe the existing tables/ prefix before writing the fresh
         # index, so equation-tables that the buggy scanner emitted are
@@ -10201,7 +10207,7 @@ ReactDOM.createRoot(root).render(e(App));
                 for chunk, vector in zip(new_chunks, vectors):
                     chunk["embedding"] = vector
         self.repository.replace_table_chunks(paper_id, new_chunks)
-        return "updated"
+        return "updated", None
 
     def enqueue_enrich_missing_metadata_job(
         self,

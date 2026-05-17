@@ -9882,6 +9882,39 @@ def test_reindex_tables_skips_papers_without_stored_pdf(
     assert result == {"papers_updated": 0, "papers_skipped": 1}
 
 
+def test_reindex_tables_passes_skip_reason_through_tracking(
+    service: PaperbaseService, monkeypatch
+):
+    """Regression: ``record_job_paper`` rejects ``outcome='skipped'``
+    without a ``skip_reason``. The first prod run of reindex_tables
+    dead-pathed on attempt 1 with `ValueError: skip_reason is required`
+    because the service called record_job_paper without one. Every
+    skip-path must hand a non-empty reason through."""
+    _patch_extract_with_docling(monkeypatch, [])
+    service.embeddings = _StubEmbeddings()
+    # Seed a paper WITHOUT a stored PDF so the no_stored_pdf path fires.
+    paper = PaperMetadata(
+        arxiv_id="2401.10010",
+        title="No PDF Paper",
+        abstract="...",
+        published="2024-01-01",
+        index_status="indexed",
+    )
+    service.repository.upsert_paper(paper, search_document=paper.abstract)
+
+    # Run through the worker dispatch so tracking_job is set and
+    # record_job_paper actually gets invoked.
+    job = service.enqueue_reindex_tables_job(limit=10)
+    completed = service.process_next_job()
+    assert completed is not None
+    assert completed.status == "completed"
+
+    job_papers = service.get_admin_job_papers(job.job_id)
+    assert job_papers.outcome_counts == {"skipped": 1}
+    # Skip reason flows through so the admin UI can explain the verdict.
+    assert job_papers.papers[0].skip_reason == "no_stored_pdf"
+
+
 def test_reindex_tables_drops_zero_table_papers_cleanly(
     service: PaperbaseService, monkeypatch
 ):
