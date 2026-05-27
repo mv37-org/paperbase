@@ -1,6 +1,6 @@
-# paper-ai
+# paperbase
 
-`paper-ai` has one supported local workflow:
+`paperbase` has one supported local workflow:
 
 1. copy the repo-root `.env.example` to `.env`
 2. run `make setup`
