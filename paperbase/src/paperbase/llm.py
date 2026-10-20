@@ -10,6 +10,7 @@ import logging
 import re
 from typing import Any
 
+import mv37.rollout as rollout
 import requests
 
 from .config import Settings
@@ -386,6 +387,7 @@ class ChatModelClient(ABC):
 class OpenAIResponsesChatModelClient(ChatModelClient):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._rollout_client: Any | None = None
 
     def _timeout_seconds(self) -> int:
         return max(1, int(self._settings.openai_response_timeout_seconds))
@@ -406,73 +408,115 @@ class OpenAIResponsesChatModelClient(ChatModelClient):
             payload["text"] = {"format": prompt.text_format}
         return payload
 
+    def _rollout_client_or_none(self):
+        client = self._rollout_client
+        if client is not None:
+            return client
+        api_key = (__import__("os").getenv("ROLLOUT_API_KEY") or "").strip()
+        if not api_key:
+            return None
+        try:
+            rollout.init(agent_name=self._settings.rollout_agent_name)
+            client = rollout.wrap(requests)
+        except Exception:
+            logger.debug("Rollout init failed open", exc_info=True)
+            client = None
+        self._rollout_client = client
+        return client
+
     def create_response(self, *, api_key: str, prompt: Prompt) -> ResponseEnvelope:
-        response = requests.post(
-            f"{self._settings.openai_base_url.rstrip('/')}/v1/responses",
-            headers={
+        request_kwargs = {
+            "headers": {
                 "authorization": f"Bearer {api_key}",
                 "content-type": "application/json",
             },
-            json=self._request_body(prompt=prompt, stream=False),
-            timeout=self._timeout_seconds(),
-        )
+            "json": self._request_body(prompt=prompt, stream=False),
+            "timeout": self._timeout_seconds(),
+        }
+        client = self._rollout_client_or_none()
+        with rollout.span("llm", name="model.call", model=self._settings.openai_model, provider="openai") as span:
+            span.record_input(prompt.input)
+            response = (client or requests).post(
+                f"{self._settings.openai_base_url.rstrip('/')}/v1/responses",
+                **request_kwargs,
+            )
         _raise_for_status_with_detail(response)
         payload = response.json()
+        span.record_output(payload)
+        usage = _usage_from_payload(payload)
+        if usage is not None:
+            span.set_usage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
         items = [_normalize_response_item(item) for item in (payload.get("output") or []) if isinstance(item, dict)]
         return ResponseEnvelope(
             response_id=str(payload.get("id") or ""),
             items=items,
-            usage=_usage_from_payload(payload),
+            usage=usage,
             raw=payload,
         )
 
     def stream_response(self, *, api_key: str, prompt: Prompt) -> Iterator[ResponseEvent]:
-        response = requests.post(
-            f"{self._settings.openai_base_url.rstrip('/')}/v1/responses",
-            headers={
+        request_kwargs = {
+            "headers": {
                 "authorization": f"Bearer {api_key}",
                 "content-type": "application/json",
             },
-            json=self._request_body(prompt=prompt, stream=True),
-            timeout=self._timeout_seconds(),
-            stream=True,
-        )
-        _raise_for_status_with_detail(response)
-        response_id = ""
-        completed_usage: ChatModelUsage | None = None
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if not raw_line:
-                continue
-            if raw_line.startswith(":") or raw_line.startswith("event:"):
-                continue
-            if not raw_line.startswith("data:"):
-                continue
-            payload_text = raw_line[5:].strip()
-            if not payload_text or payload_text == "[DONE]":
-                continue
-            payload = json.loads(payload_text)
-            event_type = str(payload.get("type") or "")
-            if event_type == "response.created":
-                response_id = str((payload.get("response") or {}).get("id") or "")
-            elif event_type == "response.completed":
-                response_id = response_id or str((payload.get("response") or {}).get("id") or "")
-                completed_usage = _usage_from_payload(payload.get("response") or payload)
-            item_payload = payload.get("item") if isinstance(payload.get("item"), dict) else None
-            yield ResponseEvent(
-                type=event_type,
-                response_id=response_id,
-                item=_normalize_response_item(item_payload) if item_payload is not None else None,
-                item_id=str(payload.get("item_id") or (item_payload or {}).get("id") or ""),
-                delta=str(payload.get("delta") or ""),
-                usage=completed_usage if event_type == "response.completed" else None,
-                raw=payload,
+            "json": self._request_body(prompt=prompt, stream=True),
+            "timeout": self._timeout_seconds(),
+            "stream": True,
+        }
+        client = self._rollout_client_or_none()
+
+        def _events() -> Iterator[ResponseEvent]:
+            response = (client or requests).post(
+                f"{self._settings.openai_base_url.rstrip('/')}/v1/responses",
+                **request_kwargs,
             )
-        if completed_usage is not None:
-            logger.info(
-                "Completed OpenAI Responses stream",
-                extra={
-                    "event": "chat.model.stream.completed",
-                    "model": self._settings.openai_model,
-                    "response_id": response_id,
-                },
-            )
+            _raise_for_status_with_detail(response)
+            response_id = ""
+            completed_usage: ChatModelUsage | None = None
+            streamed_payloads: list[dict[str, Any]] = []
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                if raw_line.startswith(":") or raw_line.startswith("event:"):
+                    continue
+                if not raw_line.startswith("data:"):
+                    continue
+                payload_text = raw_line[5:].strip()
+                if not payload_text or payload_text == "[DONE]":
+                    continue
+                payload = json.loads(payload_text)
+                streamed_payloads.append(payload)
+                event_type = str(payload.get("type") or "")
+                if event_type == "response.created":
+                    response_id = str((payload.get("response") or {}).get("id") or "")
+                elif event_type == "response.completed":
+                    response_id = response_id or str((payload.get("response") or {}).get("id") or "")
+                    completed_usage = _usage_from_payload(payload.get("response") or payload)
+                item_payload = payload.get("item") if isinstance(payload.get("item"), dict) else None
+                yield ResponseEvent(
+                    type=event_type,
+                    response_id=response_id,
+                    item=_normalize_response_item(item_payload) if item_payload is not None else None,
+                    item_id=str(payload.get("item_id") or (item_payload or {}).get("id") or ""),
+                    delta=str(payload.get("delta") or ""),
+                    usage=completed_usage if event_type == "response.completed" else None,
+                    raw=payload,
+                )
+            if completed_usage is not None:
+                logger.info(
+                    "Completed OpenAI Responses stream",
+                    extra={
+                        "event": "chat.model.stream.completed",
+                        "model": self._settings.openai_model,
+                        "response_id": response_id,
+                    },
+                )
+
+        with rollout.span("llm", name="model.call", model=self._settings.openai_model, provider="openai") as span:
+            span.record_input(prompt.input)
+            for event in _events():
+                if event.type == "response.completed" and event.usage is not None:
+                    span.set_usage(input_tokens=event.usage.input_tokens, output_tokens=event.usage.output_tokens)
+                    span.record_output(event.raw or {"response_id": event.response_id})
+                yield event

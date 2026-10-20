@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import requests
+import mv37.rollout as rollout
 
 from . import code_ingest
 
@@ -9238,79 +9239,81 @@ ReactDOM.createRoot(root).render(e(App));
         stream_output: bool = False,
     ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnExecutionResult]:
         del stream_output
-        context = self._chat_turn_context(prepared)
-        citation_registry = ChatCitationRegistry()
-        self._seed_chat_citation_registry(citation_registry, items=prepared.thread.items)
-        router = self._chat_tool_router(request, thread=prepared.thread)
-        turn_state = ChatTurnState(active_goal=prepared.user_item.content_text)
-        aggregated_usage: ChatModelUsage | None = None
-        self._log_chat_turn_progress(
-            event="chat.turn.started",
-            message="Chat turn started",
-            prepared=prepared,
-            prompt_item_count=len(context.items),
-            direct_tool_count=len(router.model_visible_specs()),
-            deferred_tool_count=len(router.deferred_specs()),
-        )
-
-        # Match Codex's task loop: keep sampling while the model emits tool calls.
-        # Completion is the first model response that yields no tool follow-up.
-        _sample_index = 0
-        while True:
-            context, prompt, compaction_events = self._ensure_chat_context_budget(
-                prepared=prepared,
-                context=context,
-                citation_registry=citation_registry,
-                turn_state=turn_state,
-                router=router,
-            )
+        rollout.init(agent_name=self.settings.rollout_agent_name)
+        with rollout.trace("agent", conversation_id=prepared.thread.thread_id) as trace:
+            trace.message(role="user", content=prepared.user_item.content_text)
+            context = self._chat_turn_context(prepared)
+            citation_registry = ChatCitationRegistry()
+            self._seed_chat_citation_registry(citation_registry, items=prepared.thread.items)
+            router = self._chat_tool_router(request, thread=prepared.thread)
+            turn_state = ChatTurnState(active_goal=prepared.user_item.content_text)
+            aggregated_usage: ChatModelUsage | None = None
             self._log_chat_turn_progress(
-                event="chat.turn.step.started",
-                message="Chat turn sampling step started",
+                event="chat.turn.started",
+                message="Chat turn started",
                 prepared=prepared,
-                sample_index=_sample_index,
                 prompt_item_count=len(context.items),
-                direct_tool_count=len(prompt.tools),
-                compactions_used=context.compactions_used,
-                parallel_tool_calls=prompt.parallel_tool_calls,
+                direct_tool_count=len(router.model_visible_specs()),
+                deferred_tool_count=len(router.deferred_specs()),
             )
-            if compaction_events:
-                self._log_chat_turn_progress(
-                    event="chat.turn.compacted",
-                    message="Chat turn compacted context before sampling",
-                    prepared=prepared,
-                    sample_index=_sample_index,
-                    compaction_event_count=len(compaction_events),
-                    compactions_used=context.compactions_used,
-                )
-            for event in compaction_events:
-                yield event
 
-            response_id = ""
-            step_usage: ChatModelUsage | None = None
-            step_items: dict[str, ChatThreadItemResponse] = {}
-            completed_assistant_item_ids: list[str] = []
-            pending_tool_calls: list[ChatThreadItemResponse] = []
-
-            for event in self._chat_model_stream_response(api_key=prepared.api_key_value or "", prompt=prompt):
-                response_id = response_id or event.response_id
-                if event.type == "response.output_item.added" and event.item is not None:
-                    provider_item_id = event.item.item_id or new_id("item")
-                    persisted_item = self._persist_response_item(
-                        thread_id=prepared.thread.thread_id,
-                        turn_id=prepared.turn.turn_id,
-                        item=event.item,
+            _sample_index = 0
+            while True:
+                with rollout.span("turn", name="agent.turn", attributes={"turn_index": _sample_index}):
+                    context, prompt, compaction_events = self._ensure_chat_context_budget(
+                        prepared=prepared,
+                        context=context,
+                        citation_registry=citation_registry,
+                        turn_state=turn_state,
+                        router=router,
                     )
-                    step_items[provider_item_id] = persisted_item
                     self._log_chat_turn_progress(
-                        event="chat.turn.item.started",
-                        message="Chat turn item started",
+                        event="chat.turn.step.started",
+                        message="Chat turn sampling step started",
                         prepared=prepared,
                         sample_index=_sample_index,
-                        item=persisted_item,
+                        prompt_item_count=len(context.items),
+                        direct_tool_count=len(prompt.tools),
+                        compactions_used=context.compactions_used,
+                        parallel_tool_calls=prompt.parallel_tool_calls,
                     )
-                    yield ("item_started", {"item": persisted_item.model_dump(mode="json")})
-                    continue
+                    if compaction_events:
+                        self._log_chat_turn_progress(
+                            event="chat.turn.compacted",
+                            message="Chat turn compacted context before sampling",
+                            prepared=prepared,
+                            sample_index=_sample_index,
+                            compaction_event_count=len(compaction_events),
+                            compactions_used=context.compactions_used,
+                        )
+                    for event in compaction_events:
+                        yield event
+
+                    response_id = ""
+                    step_usage: ChatModelUsage | None = None
+                    step_items: dict[str, ChatThreadItemResponse] = {}
+                    completed_assistant_item_ids: list[str] = []
+                    pending_tool_calls: list[ChatThreadItemResponse] = []
+
+                    for event in self._chat_model_stream_response(api_key=prepared.api_key_value or "", prompt=prompt):
+                        response_id = response_id or event.response_id
+                        if event.type == "response.output_item.added" and event.item is not None:
+                            provider_item_id = event.item.item_id or new_id("item")
+                            persisted_item = self._persist_response_item(
+                                thread_id=prepared.thread.thread_id,
+                                turn_id=prepared.turn.turn_id,
+                                item=event.item,
+                            )
+                            step_items[provider_item_id] = persisted_item
+                            self._log_chat_turn_progress(
+                                event="chat.turn.item.started",
+                                message="Chat turn item started",
+                                prepared=prepared,
+                                sample_index=_sample_index,
+                                item=persisted_item,
+                            )
+                            yield ("item_started", {"item": persisted_item.model_dump(mode="json")})
+                            continue
                 if event.type in {"response.output_text.delta", "response.function_call_arguments.delta"}:
                     provider_item_id = event.item_id or new_id("item")
                     persisted_item = step_items.get(provider_item_id)

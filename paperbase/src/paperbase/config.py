@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_base_url: str = Field(default="https://api.anthropic.com")
     anthropic_model: str = Field(default="claude-opus-4-7")
+    rollout_agent_name: str = Field(default="paperbase-browser-chat")
     chat_runtime_mode: str = Field(default="codex_kernel")
     upload_max_bytes: int = Field(default=25_000_000)
     gcs_project: str | None = None
