@@ -9238,342 +9238,350 @@ ReactDOM.createRoot(root).render(e(App));
         stream_output: bool = False,
     ) -> Generator[tuple[str, dict[str, Any]], None, ChatTurnExecutionResult]:
         del stream_output
-        context = self._chat_turn_context(prepared)
-        citation_registry = ChatCitationRegistry()
-        self._seed_chat_citation_registry(citation_registry, items=prepared.thread.items)
-        router = self._chat_tool_router(request, thread=prepared.thread)
-        turn_state = ChatTurnState(active_goal=prepared.user_item.content_text)
-        aggregated_usage: ChatModelUsage | None = None
-        self._log_chat_turn_progress(
-            event="chat.turn.started",
-            message="Chat turn started",
-            prepared=prepared,
-            prompt_item_count=len(context.items),
-            direct_tool_count=len(router.model_visible_specs()),
-            deferred_tool_count=len(router.deferred_specs()),
-        )
+        try:
+            rollout.init(agent_name=self.settings.rollout_agent_name)
+        except Exception:
+            logger.debug("Rollout init failed open", exc_info=True)
 
-        # Match Codex's task loop: keep sampling while the model emits tool calls.
-        # Completion is the first model response that yields no tool follow-up.
-        _sample_index = 0
-        while True:
-            context, prompt, compaction_events = self._ensure_chat_context_budget(
-                prepared=prepared,
-                context=context,
-                citation_registry=citation_registry,
-                turn_state=turn_state,
-                router=router,
-            )
+        with rollout.trace("agent", conversation_id=prepared.thread.thread_id) as trace:
+            trace.message(role="user", content=prepared.user_item.content_text)
+            context = self._chat_turn_context(prepared)
+            citation_registry = ChatCitationRegistry()
+            self._seed_chat_citation_registry(citation_registry, items=prepared.thread.items)
+            router = self._chat_tool_router(request, thread=prepared.thread)
+            turn_state = ChatTurnState(active_goal=prepared.user_item.content_text)
+            aggregated_usage: ChatModelUsage | None = None
             self._log_chat_turn_progress(
-                event="chat.turn.step.started",
-                message="Chat turn sampling step started",
+                event="chat.turn.started",
+                message="Chat turn started",
                 prepared=prepared,
-                sample_index=_sample_index,
                 prompt_item_count=len(context.items),
-                direct_tool_count=len(prompt.tools),
-                compactions_used=context.compactions_used,
-                parallel_tool_calls=prompt.parallel_tool_calls,
+                direct_tool_count=len(router.model_visible_specs()),
+                deferred_tool_count=len(router.deferred_specs()),
             )
-            if compaction_events:
-                self._log_chat_turn_progress(
-                    event="chat.turn.compacted",
-                    message="Chat turn compacted context before sampling",
-                    prepared=prepared,
-                    sample_index=_sample_index,
-                    compaction_event_count=len(compaction_events),
-                    compactions_used=context.compactions_used,
-                )
-            for event in compaction_events:
-                yield event
 
-            response_id = ""
-            step_usage: ChatModelUsage | None = None
-            step_items: dict[str, ChatThreadItemResponse] = {}
-            completed_assistant_item_ids: list[str] = []
-            pending_tool_calls: list[ChatThreadItemResponse] = []
-
-            for event in self._chat_model_stream_response(api_key=prepared.api_key_value or "", prompt=prompt):
-                response_id = response_id or event.response_id
-                if event.type == "response.output_item.added" and event.item is not None:
-                    provider_item_id = event.item.item_id or new_id("item")
-                    persisted_item = self._persist_response_item(
-                        thread_id=prepared.thread.thread_id,
-                        turn_id=prepared.turn.turn_id,
-                        item=event.item,
+            # Match Codex's task loop: keep sampling while the model emits tool calls.
+            # Completion is the first model response that yields no tool follow-up.
+            _sample_index = 0
+            while True:
+                with rollout.span("turn", name="agent.turn", attributes={"turn_index": _sample_index}):
+                    context, prompt, compaction_events = self._ensure_chat_context_budget(
+                        prepared=prepared,
+                        context=context,
+                        citation_registry=citation_registry,
+                        turn_state=turn_state,
+                        router=router,
                     )
-                    step_items[provider_item_id] = persisted_item
                     self._log_chat_turn_progress(
-                        event="chat.turn.item.started",
-                        message="Chat turn item started",
+                        event="chat.turn.step.started",
+                        message="Chat turn sampling step started",
                         prepared=prepared,
                         sample_index=_sample_index,
-                        item=persisted_item,
+                        prompt_item_count=len(context.items),
+                        direct_tool_count=len(prompt.tools),
+                        compactions_used=context.compactions_used,
+                        parallel_tool_calls=prompt.parallel_tool_calls,
                     )
-                    yield ("item_started", {"item": persisted_item.model_dump(mode="json")})
-                    continue
-                if event.type in {"response.output_text.delta", "response.function_call_arguments.delta"}:
-                    provider_item_id = event.item_id or new_id("item")
-                    persisted_item = step_items.get(provider_item_id)
-                    if persisted_item is None:
-                        role = "assistant" if event.type == "response.output_text.delta" else "assistant"
-                        item_type = "assistant_message" if event.type == "response.output_text.delta" else "function_call"
-                        persisted_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
-                            thread_id=prepared.thread.thread_id,
-                            turn_id=prepared.turn.turn_id,
-                            item_id=new_id("item"),
-                            item_type=item_type,
-                            role=role,
-                            content_text="",
-                            status="in_progress",
+                    if compaction_events:
+                        self._log_chat_turn_progress(
+                            event="chat.turn.compacted",
+                            message="Chat turn compacted context before sampling",
+                            prepared=prepared,
+                            sample_index=_sample_index,
+                            compaction_event_count=len(compaction_events),
+                            compactions_used=context.compactions_used,
                         )
-                    updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
-                        persisted_item.item_id,
-                        content_text=f"{persisted_item.content_text}{event.delta}",
-                        status="in_progress",
-                    )
-                    if updated_item is None:
-                        raise RuntimeError("Streaming item vanished during update")
-                    step_items[provider_item_id] = updated_item
-                    yield (
-                        "item_delta",
-                        {
-                            "item_id": updated_item.item_id,
-                            "delta": event.delta,
-                            "delta_type": "output_text"
-                            if event.type == "response.output_text.delta"
-                            else "function_call_arguments",
-                        },
-                    )
-                    continue
-                if event.type == "response.output_item.done" and event.item is not None:
-                    provider_item_id = event.item.item_id or new_id("item")
-                    persisted_item = step_items.get(provider_item_id)
-                    if persisted_item is None:
-                        persisted_item = self._persist_response_item(
-                            thread_id=prepared.thread.thread_id,
-                            turn_id=prepared.turn.turn_id,
-                            item=event.item,
-                        )
-                    else:
-                        persisted_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
-                            persisted_item.item_id,
-                            item_type=self._thread_item_type_from_response_item(event.item),
-                            phase=event.item.phase or persisted_item.phase,
-                            name=event.item.name or persisted_item.name,
-                            call_id=event.item.call_id or persisted_item.call_id,
-                            content_text=event.item.content_text or persisted_item.content_text,
-                            content_json=event.item.content_json,
-                            status=event.item.status or "completed",
-                        )
-                    if persisted_item is None:
-                        raise RuntimeError("Completed output item vanished during persistence")
-                    step_items[provider_item_id] = persisted_item
-                    normalized_item = self._chat_input_item_from_thread_item(persisted_item)
-                    if normalized_item is not None:
-                        context.items.append(normalized_item)
-                    self._log_chat_turn_progress(
-                        event="chat.turn.item.completed",
-                        message="Chat turn item completed",
-                        prepared=prepared,
-                        sample_index=_sample_index,
-                        item=persisted_item,
-                    )
-                    if persisted_item.item_type == "assistant_message":
-                        completed_assistant_item_ids.append(provider_item_id)
-                        continue
-                    if persisted_item.item_type in {"function_call", "custom_tool_call"}:
-                        pending_tool_calls.append(persisted_item)
-                    yield ("item_completed", {"item": persisted_item.model_dump(mode="json")})
-                    continue
-                if event.type == "response.completed":
-                    response_id = response_id or event.response_id
-                    step_usage = _merge_chat_usage(step_usage, event.usage)
-                    self._log_chat_turn_progress(
-                        event="chat.turn.step.response.completed",
-                        message="Chat model response stream completed",
-                        prepared=prepared,
-                        sample_index=_sample_index,
-                        response_id=response_id,
-                        input_tokens=step_usage.input_tokens if step_usage is not None else None,
-                        output_tokens=step_usage.output_tokens if step_usage is not None else None,
-                        total_tokens=step_usage.total_tokens if step_usage is not None else None,
-                    )
+                    for event in compaction_events:
+                        yield event
 
-            aggregated_usage = _merge_chat_usage(aggregated_usage, step_usage)
-            if step_usage is not None:
-                yield ("usage", self._chat_usage_payload(step_usage))
+                    response_id = ""
+                    step_usage: ChatModelUsage | None = None
+                    step_items: dict[str, ChatThreadItemResponse] = {}
+                    completed_assistant_item_ids: list[str] = []
+                    pending_tool_calls: list[ChatThreadItemResponse] = []
 
-            completed_assistant_items = [
-                step_items[item_id]
-                for item_id in completed_assistant_item_ids
-                if item_id in step_items
-            ]
-            final_item: ChatThreadItemResponse | None = None
-            if completed_assistant_items:
-                for provider_item_id, item in zip(completed_assistant_item_ids[:-1], completed_assistant_items[:-1], strict=False):
-                    phase = self._assistant_message_phase(
-                        item,
-                        is_last_assistant_item=False,
+                    for event in self._chat_model_stream_response(api_key=prepared.api_key_value or "", prompt=prompt):
+                        response_id = response_id or event.response_id
+                        if event.type == "response.output_item.added" and event.item is not None:
+                            provider_item_id = event.item.item_id or new_id("item")
+                            persisted_item = self._persist_response_item(
+                                thread_id=prepared.thread.thread_id,
+                                turn_id=prepared.turn.turn_id,
+                                item=event.item,
+                            )
+                            step_items[provider_item_id] = persisted_item
+                            self._log_chat_turn_progress(
+                                event="chat.turn.item.started",
+                                message="Chat turn item started",
+                                prepared=prepared,
+                                sample_index=_sample_index,
+                                item=persisted_item,
+                            )
+                            yield ("item_started", {"item": persisted_item.model_dump(mode="json")})
+                            continue
+                        if event.type in {"response.output_text.delta", "response.function_call_arguments.delta"}:
+                            provider_item_id = event.item_id or new_id("item")
+                            persisted_item = step_items.get(provider_item_id)
+                            if persisted_item is None:
+                                role = "assistant" if event.type == "response.output_text.delta" else "assistant"
+                                item_type = "assistant_message" if event.type == "response.output_text.delta" else "function_call"
+                                persisted_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+                                    thread_id=prepared.thread.thread_id,
+                                    turn_id=prepared.turn.turn_id,
+                                    item_id=new_id("item"),
+                                    item_type=item_type,
+                                    role=role,
+                                    content_text="",
+                                    status="in_progress",
+                                )
+                            updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                                persisted_item.item_id,
+                                content_text=f"{persisted_item.content_text}{event.delta}",
+                                status="in_progress",
+                            )
+                            if updated_item is None:
+                                raise RuntimeError("Streaming item vanished during update")
+                            step_items[provider_item_id] = updated_item
+                            yield (
+                                "item_delta",
+                                {
+                                    "item_id": updated_item.item_id,
+                                    "delta": event.delta,
+                                    "delta_type": "output_text"
+                                    if event.type == "response.output_text.delta"
+                                    else "function_call_arguments",
+                                },
+                            )
+                            continue
+                        if event.type == "response.output_item.done" and event.item is not None:
+                            provider_item_id = event.item.item_id or new_id("item")
+                            persisted_item = step_items.get(provider_item_id)
+                            if persisted_item is None:
+                                persisted_item = self._persist_response_item(
+                                    thread_id=prepared.thread.thread_id,
+                                    turn_id=prepared.turn.turn_id,
+                                    item=event.item,
+                                )
+                            else:
+                                persisted_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                                    persisted_item.item_id,
+                                    item_type=self._thread_item_type_from_response_item(event.item),
+                                    phase=event.item.phase or persisted_item.phase,
+                                    name=event.item.name or persisted_item.name,
+                                    call_id=event.item.call_id or persisted_item.call_id,
+                                    content_text=event.item.content_text or persisted_item.content_text,
+                                    content_json=event.item.content_json,
+                                    status=event.item.status or "completed",
+                                )
+                            if persisted_item is None:
+                                raise RuntimeError("Completed output item vanished during persistence")
+                            step_items[provider_item_id] = persisted_item
+                            normalized_item = self._chat_input_item_from_thread_item(persisted_item)
+                            if normalized_item is not None:
+                                context.items.append(normalized_item)
+                            self._log_chat_turn_progress(
+                                event="chat.turn.item.completed",
+                                message="Chat turn item completed",
+                                prepared=prepared,
+                                sample_index=_sample_index,
+                                item=persisted_item,
+                            )
+                            if persisted_item.item_type == "assistant_message":
+                                completed_assistant_item_ids.append(provider_item_id)
+                                continue
+                            if persisted_item.item_type in {"function_call", "custom_tool_call"}:
+                                pending_tool_calls.append(persisted_item)
+                            yield ("item_completed", {"item": persisted_item.model_dump(mode="json")})
+                            continue
+                        if event.type == "response.completed":
+                            response_id = response_id or event.response_id
+                            step_usage = _merge_chat_usage(step_usage, event.usage)
+                            self._log_chat_turn_progress(
+                                event="chat.turn.step.response.completed",
+                                message="Chat model response stream completed",
+                                prepared=prepared,
+                                sample_index=_sample_index,
+                                response_id=response_id,
+                                input_tokens=step_usage.input_tokens if step_usage is not None else None,
+                                output_tokens=step_usage.output_tokens if step_usage is not None else None,
+                                total_tokens=step_usage.total_tokens if step_usage is not None else None,
+                            )
+
+                aggregated_usage = _merge_chat_usage(aggregated_usage, step_usage)
+                if step_usage is not None:
+                    yield ("usage", self._chat_usage_payload(step_usage))
+
+                completed_assistant_items = [
+                    step_items[item_id]
+                    for item_id in completed_assistant_item_ids
+                    if item_id in step_items
+                ]
+                final_item: ChatThreadItemResponse | None = None
+                if completed_assistant_items:
+                    for provider_item_id, item in zip(completed_assistant_item_ids[:-1], completed_assistant_items[:-1], strict=False):
+                        phase = self._assistant_message_phase(
+                            item,
+                            is_last_assistant_item=False,
+                            pending_tool_calls=bool(pending_tool_calls),
+                        )
+                        updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                            item.item_id,
+                            phase=phase,
+                            content_text=_sanitize_inline_citations(item.content_text, citation_registry.citations),
+                            status="completed",
+                        )
+                        if updated_item is not None:
+                            step_items[provider_item_id] = updated_item
+                            yield ("item_completed", {"item": updated_item.model_dump(mode="json")})
+                    last_provider_item_id = completed_assistant_item_ids[-1]
+                    last_item = completed_assistant_items[-1]
+                    last_phase = self._assistant_message_phase(
+                        last_item,
+                        is_last_assistant_item=True,
                         pending_tool_calls=bool(pending_tool_calls),
                     )
-                    updated_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
-                        item.item_id,
-                        phase=phase,
-                        content_text=_sanitize_inline_citations(item.content_text, citation_registry.citations),
+                    updated_last_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                        last_item.item_id,
+                        phase=last_phase,
+                        content_text=_sanitize_inline_citations(last_item.content_text, citation_registry.citations),
+                        citations=[citation.model_dump() for citation in citation_registry.citations]
+                        if last_phase == "final_answer"
+                        else [],
                         status="completed",
                     )
-                    if updated_item is not None:
-                        step_items[provider_item_id] = updated_item
-                        yield ("item_completed", {"item": updated_item.model_dump(mode="json")})
-                last_provider_item_id = completed_assistant_item_ids[-1]
-                last_item = completed_assistant_items[-1]
-                last_phase = self._assistant_message_phase(
-                    last_item,
-                    is_last_assistant_item=True,
-                    pending_tool_calls=bool(pending_tool_calls),
-                )
-                updated_last_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
-                    last_item.item_id,
-                    phase=last_phase,
-                    content_text=_sanitize_inline_citations(last_item.content_text, citation_registry.citations),
-                    citations=[citation.model_dump() for citation in citation_registry.citations]
-                    if last_phase == "final_answer"
-                    else [],
-                    status="completed",
-                )
-                if updated_last_item is not None:
-                    step_items[last_provider_item_id] = updated_last_item
-                    yield ("item_completed", {"item": updated_last_item.model_dump(mode="json")})
-                    if last_phase == "final_answer":
-                        final_item = updated_last_item
+                    if updated_last_item is not None:
+                        step_items[last_provider_item_id] = updated_last_item
+                        yield ("item_completed", {"item": updated_last_item.model_dump(mode="json")})
+                        if last_phase == "final_answer":
+                            final_item = updated_last_item
 
-            if not pending_tool_calls:
-                if final_item is not None:
-                    updated_final_item = self._attach_recommended_reading_prompts(
-                        api_key=prepared.api_key_value or "",
+                if not pending_tool_calls:
+                    if final_item is not None:
+                        updated_final_item = self._attach_recommended_reading_prompts(
+                            api_key=prepared.api_key_value or "",
+                            prepared=prepared,
+                            final_item=final_item,
+                        )
+                        if updated_final_item != final_item:
+                            final_item = updated_final_item
+                            yield ("item_completed", {"item": final_item.model_dump(mode="json")})
+                    final_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
+                        prepared.turn.turn_id,
+                        status="completed",
+                        provider_response_id=response_id,
+                        completed_at=utcnow(),
+                        usage=self._chat_usage_payload(aggregated_usage) if aggregated_usage is not None else None,
+                        diff_summary=turn_state.diff_tracker.unified_diff(),
+                        changed_paths=turn_state.diff_tracker.changed_files(),
+                        exec_session_ids=sorted(turn_state.running_exec_session_ids),
+                    )
+                    self._log_chat_turn_progress(
+                        event="chat.turn.completed",
+                        message="Chat turn completed",
                         prepared=prepared,
+                        sample_index=_sample_index,
+                        item=final_item,
+                        changed_path_count=len(turn_state.diff_tracker.changed_files()),
+                        exec_session_count=len(turn_state.running_exec_session_ids),
+                        input_tokens=aggregated_usage.input_tokens if aggregated_usage is not None else None,
+                        output_tokens=aggregated_usage.output_tokens if aggregated_usage is not None else None,
+                        total_tokens=aggregated_usage.total_tokens if aggregated_usage is not None else None,
+                    )
+                    return ChatTurnExecutionResult(
+                        turn=final_turn or prepared.turn,
                         final_item=final_item,
-                    )
-                    if updated_final_item != final_item:
-                        final_item = updated_final_item
-                        yield ("item_completed", {"item": final_item.model_dump(mode="json")})
-                final_turn = self.repository.update_chat_turn(  # type: ignore[attr-defined]
-                    prepared.turn.turn_id,
-                    status="completed",
-                    provider_response_id=response_id,
-                    completed_at=utcnow(),
-                    usage=self._chat_usage_payload(aggregated_usage) if aggregated_usage is not None else None,
-                    diff_summary=turn_state.diff_tracker.unified_diff(),
-                    changed_paths=turn_state.diff_tracker.changed_files(),
-                    exec_session_ids=sorted(turn_state.running_exec_session_ids),
-                )
-                self._log_chat_turn_progress(
-                    event="chat.turn.completed",
-                    message="Chat turn completed",
-                    prepared=prepared,
-                    sample_index=_sample_index,
-                    item=final_item,
-                    changed_path_count=len(turn_state.diff_tracker.changed_files()),
-                    exec_session_count=len(turn_state.running_exec_session_ids),
-                    input_tokens=aggregated_usage.input_tokens if aggregated_usage is not None else None,
-                    output_tokens=aggregated_usage.output_tokens if aggregated_usage is not None else None,
-                    total_tokens=aggregated_usage.total_tokens if aggregated_usage is not None else None,
-                )
-                return ChatTurnExecutionResult(
-                    turn=final_turn or prepared.turn,
-                    final_item=final_item,
-                    citation_registry=citation_registry,
-                    usage=aggregated_usage,
-                )
-
-            self._log_chat_turn_progress(
-                event="chat.turn.tools.queued",
-                message="Chat turn queued tool calls for execution",
-                prepared=prepared,
-                sample_index=_sample_index,
-                pending_tool_call_count=len(pending_tool_calls),
-            )
-            for index, tool_item in enumerate(pending_tool_calls):
-                tool_name = tool_item.name or ""
-                tool_input = tool_item.content_json if isinstance(tool_item.content_json, dict) else {}
-                if not tool_input and tool_item.content_text.strip():
-                    try:
-                        parsed_tool_input = json.loads(tool_item.content_text)
-                        if isinstance(parsed_tool_input, dict):
-                            tool_input = parsed_tool_input
-                    except json.JSONDecodeError:
-                        tool_input = {}
-                self._log_chat_turn_progress(
-                    event="chat.turn.tool.started",
-                    message="Chat tool execution started",
-                    prepared=prepared,
-                    sample_index=_sample_index,
-                    item=tool_item,
-                    tool_name=tool_name,
-                    tool_call_index=index,
-                )
-                if router.find_spec(tool_name) is None:
-                    payload = {"error": f"Unknown tool: {tool_name}"}
-                    is_error = True
-                else:
-                    self._capture_turn_state_before_tool(
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        user=user,
-                        project_id=prepared.thread.project_id,
-                        turn_state=turn_state,
-                    )
-                    payload, is_error = self._run_single_chat_tool(
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        user=user,
                         citation_registry=citation_registry,
-                        thread_id=prepared.thread.thread_id,
-                        project_id=prepared.thread.project_id,
+                        usage=aggregated_usage,
                     )
-                    self._update_turn_state_from_tool_result(
-                        tool_name=tool_name,
-                        payload=payload,
-                        is_error=is_error,
-                        user=user,
-                        project_id=prepared.thread.project_id,
-                        turn_state=turn_state,
-                    )
-                output_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
-                    thread_id=prepared.thread.thread_id,
-                    turn_id=prepared.turn.turn_id,
-                    item_type="function_call_output",
-                    role="tool",
-                    call_id=tool_item.call_id or tool_item.item_id,
-                    name=tool_name,
-                    content_text="",
-                    status="in_progress",
-                )
-                yield ("item_started", {"item": output_item.model_dump(mode="json")})
-                output_text = json.dumps(payload, ensure_ascii=False)
-                completed_output_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
-                    output_item.item_id,
-                    content_text=output_text,
-                    content_json=payload,
-                    status="completed",
-                )
-                if completed_output_item is None:
-                    raise RuntimeError("Tool output item vanished during persistence")
-                normalized_output_item = self._chat_input_item_from_thread_item(completed_output_item)
-                if normalized_output_item is not None:
-                    context.items.append(normalized_output_item)
+
                 self._log_chat_turn_progress(
-                    event="chat.turn.tool.completed",
-                    message="Chat tool execution completed",
+                    event="chat.turn.tools.queued",
+                    message="Chat turn queued tool calls for execution",
                     prepared=prepared,
                     sample_index=_sample_index,
-                    item=completed_output_item,
-                    tool_name=tool_name,
-                    tool_call_index=index,
-                    is_error=is_error,
+                    pending_tool_call_count=len(pending_tool_calls),
                 )
-                yield ("item_completed", {"item": completed_output_item.model_dump(mode="json")})
-            _sample_index += 1
+                for index, tool_item in enumerate(pending_tool_calls):
+                    tool_name = tool_item.name or ""
+                    tool_input = tool_item.content_json if isinstance(tool_item.content_json, dict) else {}
+                    if not tool_input and tool_item.content_text.strip():
+                        try:
+                            parsed_tool_input = json.loads(tool_item.content_text)
+                            if isinstance(parsed_tool_input, dict):
+                                tool_input = parsed_tool_input
+                        except json.JSONDecodeError:
+                            tool_input = {}
+                    self._log_chat_turn_progress(
+                        event="chat.turn.tool.started",
+                        message="Chat tool execution started",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        item=tool_item,
+                        tool_name=tool_name,
+                        tool_call_index=index,
+                    )
+                    if router.find_spec(tool_name) is None:
+                        payload = {"error": f"Unknown tool: {tool_name}"}
+                        is_error = True
+                    else:
+                        self._capture_turn_state_before_tool(
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            user=user,
+                            project_id=prepared.thread.project_id,
+                            turn_state=turn_state,
+                        )
+                        payload, is_error = self._run_single_chat_tool(
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            user=user,
+                            citation_registry=citation_registry,
+                            thread_id=prepared.thread.thread_id,
+                            project_id=prepared.thread.project_id,
+                        )
+                        self._update_turn_state_from_tool_result(
+                            tool_name=tool_name,
+                            payload=payload,
+                            is_error=is_error,
+                            user=user,
+                            project_id=prepared.thread.project_id,
+                            turn_state=turn_state,
+                        )
+                    output_item = self.repository.add_chat_thread_item(  # type: ignore[attr-defined]
+                        thread_id=prepared.thread.thread_id,
+                        turn_id=prepared.turn.turn_id,
+                        item_type="function_call_output",
+                        role="tool",
+                        call_id=tool_item.call_id or tool_item.item_id,
+                        name=tool_name,
+                        content_text="",
+                        status="in_progress",
+                    )
+                    yield ("item_started", {"item": output_item.model_dump(mode="json")})
+                    output_text = json.dumps(payload, ensure_ascii=False)
+                    completed_output_item = self.repository.update_chat_thread_item(  # type: ignore[attr-defined]
+                        output_item.item_id,
+                        content_text=output_text,
+                        content_json=payload,
+                        status="completed",
+                    )
+                    if completed_output_item is None:
+                        raise RuntimeError("Tool output item vanished during persistence")
+                    normalized_output_item = self._chat_input_item_from_thread_item(completed_output_item)
+                    if normalized_output_item is not None:
+                        context.items.append(normalized_output_item)
+                    self._log_chat_turn_progress(
+                        event="chat.turn.tool.completed",
+                        message="Chat tool execution completed",
+                        prepared=prepared,
+                        sample_index=_sample_index,
+                        item=completed_output_item,
+                        tool_name=tool_name,
+                        tool_call_index=index,
+                        is_error=is_error,
+                    )
+                    yield ("item_completed", {"item": completed_output_item.model_dump(mode="json")})
+                _sample_index += 1
 
     def _api_key_required_response(
         self,

@@ -28,6 +28,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "psycopg[binary]>=3.2",
     "requests>=2.32",
+    "mv37-rollout>=0",
     "sentence-transformers>=3.0",
     "sqlalchemy>=2.0",
     "uvicorn>=0.30",

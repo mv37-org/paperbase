@@ -7134,6 +7134,71 @@ def test_browser_chat_stream_emits_citations_and_completion(monkeypatch, browser
     assert refreshed["messages"][-1]["status"] == "completed"
     assert refreshed["messages"][-1]["citations"]
 
+
+def test_stream_chat_rollout_tracing_captures_turns_tools_errors_and_continuation(monkeypatch, browser_service):
+    import mv37.rollout as rollout
+
+    service, _, _ = browser_service
+    session, _ = service.register_browser_user(
+        SignupRequest(email="trace@example.com", password="topsecret123", display_name="Trace User")
+    )
+    assert session.user is not None
+    _save_browser_openai_key(service, session.user)
+    thread = service.create_chat_thread(session.user, CreateChatThreadRequest(title="Trace chat"))
+
+    seen_events: list[dict[str, object]] = []
+
+    class _Collector:
+        def capture_event(self, event):
+            seen_events.append(event)
+
+        def shutdown(self):
+            return None
+
+    monkeypatch.setenv("ROLLOUT_API_KEY", "test-rollout-key")
+    monkeypatch.setenv("ROLLOUT_BASE_URL", "https://app.rollout.work")
+    monkeypatch.setattr(rollout, "init", lambda **kwargs: None)
+    monkeypatch.setattr("paperbase.llm.rollout.wrap", lambda client: client)
+    monkeypatch.setattr("paperbase.service.rollout.init", lambda **kwargs: None)
+    monkeypatch.setattr(rollout, "_default_client", _Collector(), raising=False)
+
+    original_run = service._run_single_chat_tool
+    calls = {"count": 0}
+
+    def traced_run_single_chat_tool(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            return {"error": "Tool execution failed"}, True
+        return original_run(**kwargs)
+
+    monkeypatch.setattr(service, "_run_single_chat_tool", traced_run_single_chat_tool)
+
+    events_one = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Explain grounding", tag_filters=[]),
+        )
+    )
+    events_two = list(
+        service.stream_chat_message(
+            session.user,
+            thread.thread_id,
+            SendChatMessageRequest(content="Continue with a follow-up", tag_filters=[]),
+        )
+    )
+
+    assert any(name == "turn_completed" for name, _ in events_one)
+    assert any(name == "turn_completed" for name, _ in events_two)
+    assert _event_items(events_one, event_name="item_completed", item_type="function_call")
+    outputs = _event_items(events_one + events_two, event_name="item_completed", item_type="function_call_output")
+    assert outputs
+    assert outputs[0]["status"] == "completed"
+    assert any("error" in (item.get("content_json") or {}) for item in outputs)
+    assert seen_events
+    trace_ids = {event.get("trace_id") for event in seen_events if isinstance(event, dict) and event.get("trace_id")}
+    assert len(trace_ids) == 1
+
     app.dependency_overrides.clear()
 
 
